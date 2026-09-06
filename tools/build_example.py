@@ -28,7 +28,7 @@ CHAIN_FILE = "mmx_chain_last.png"
 def build_api(template: dict) -> dict:
     p = copy.deepcopy(template)
     p.pop("115", None); p.pop("193", None)
-    W, H = 768, 432
+    W, H = 768, 448   # both multiples of 32: the DiT patchifies 16px latents by 2, so 432 (latent 27) fails to reshape
     # direction comes from the sequence; references: identity + chain frame both as pictures
     p["185"]["inputs"].update({"width": W, "height": H, "openrouter_api_key": "", "prompt_provider": "openrouter",
                                "references_json": json.dumps({"references": [{"kind": "image", "file": REF_IMAGE}, {"kind": "image", "file": FIRST_IMAGE}]}),
