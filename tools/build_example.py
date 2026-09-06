@@ -84,7 +84,7 @@ LINK_TYPES = {"MODEL", "CLIP", "VAE", "IMAGE", "LATENT", "CONDITIONING", "AUDIO"
 
 
 def to_ui(api: dict, oi: dict) -> dict:
-    oi = {**oi, **LOCAL_OI}
+    oi = {**LOCAL_OI, **oi}   # a real object_info dump (taken with the pack installed) wins over the built-in stubs
     nodes, links = [], []
     link_id = 1
     # topological depth for layout
@@ -121,13 +121,16 @@ def to_ui(api: dict, oi: dict) -> dict:
                 entry = {"name": name, "type": typ if isinstance(typ, str) else "COMBO", "link": None, "_src": (str(v[0]), int(v[1]))}
                 if is_widget:
                     entry["widget"] = {"name": name}
-                    # a widget converted to an input keeps a placeholder value in widgets_values
+                    # a widget converted to an input keeps a placeholder value in widgets_values …
                     widgets_values.append(typ[0] if isinstance(typ, list) and typ else {"INT": 0, "FLOAT": 0.0, "STRING": "", "BOOLEAN": False}.get(typ, ""))
+                    # … and an INT/FLOAT with control_after_generate keeps its control value too
+                    if len(spec) > 1 and isinstance(spec[1], dict) and spec[1].get("control_after_generate") is not None and typ in ("INT", "FLOAT"):
+                        widgets_values.append(spec[1].get("control_after_generate") or "fixed")
                 inputs.append(entry)
             elif is_widget:
                 if name in n["inputs"]:
                     widgets_values.append(v)
-                    if spec and len(spec) > 1 and isinstance(spec[1], dict) and spec[1].get("control_after_generate") is not None and typ == "INT":
+                    if spec and len(spec) > 1 and isinstance(spec[1], dict) and spec[1].get("control_after_generate") is not None and typ in ("INT", "FLOAT"):
                         widgets_values.append(spec[1].get("control_after_generate") or "fixed")
                 elif name == "control_after_generate":
                     pass

@@ -4,13 +4,22 @@ Preset store: /workspace/mmx/presets.json (MMX_PRESETS overrides), mirrored from
 share (mmx/presets.json) over the instance's existing NAS ssh path. On load: pull the NAS copy
 and merge it (survives a re-rent), then register the HTTP routes the web extension uses.
 """
-import threading
+import os, threading
 
 from .mmx_presets import store as _store
 from .mmx_presets.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 WEB_DIRECTORY = "./web"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
+# The RefPack node reads OPENROUTER_API_KEY / LLM_KEY from ComfyUI's environment; the Vast
+# template carries the key as OPENROUTER_KEY (and a ComfyUI restarted from an ssh session has
+# none of the template env). Bridge it once, inside this process, from the env or PID 1's env.
+if not os.environ.get("OPENROUTER_API_KEY"):
+    _k = _store._pid1_env("OPENROUTER_API_KEY") or _store._pid1_env("OPENROUTER_KEY") or _store._pid1_env("LLM_KEY")
+    if _k:
+        os.environ["OPENROUTER_API_KEY"] = _k
+        print("[mmx-presets] OPENROUTER_API_KEY set for this ComfyUI process from the template env")
 
 _st = _store.get_store()
 _st.load()

@@ -1187,7 +1187,7 @@
    ],
    "size": [
     360,
-    432
+    456
    ],
    "flags": {},
    "order": 1,
@@ -1261,6 +1261,7 @@
    },
    "widgets_values": [
     0,
+    "increment",
     1.0,
     "establishing",
     "close up",

@@ -77,10 +77,10 @@ app.registerExtension({
     if (node.comfyClass !== "MMXPresetSave") {
       try {
         const w = ComfyWidgets.STRING(node, "mmx_info", ["STRING", { multiline: true }], app);
-        w.widget.name = "mmx_info"; w.widget.serialize = false;
+        w.widget.name = "mmx_info"; w.widget.serialize = false; w.widget.options = { ...(w.widget.options || {}), serialize: false };
         if (w.widget.inputEl) { w.widget.inputEl.readOnly = true; w.widget.inputEl.style.opacity = 0.85; w.widget.inputEl.placeholder = "preset LoRAs"; }
       } catch (e) {
-        const info = node.addWidget("text", "mmx_info", "", () => {}); info.serialize = false; info.disabled = true;
+        const info = node.addWidget("text", "mmx_info", "", () => {}, { serialize: false }); info.serialize = false; info.disabled = true;
       }
     }
     const btn = node.addWidget("button", "↻ Refresh presets", null, async () => {
@@ -96,7 +96,7 @@ app.registerExtension({
       setTimeout(() => { btn.name = "↻ Refresh presets"; node.setDirtyCanvas(true, true); }, 4000);
       node.setDirtyCanvas(true, true);
     });
-    btn.serialize = false;
+    btn.serialize = false; btn.options = { ...(btn.options || {}), serialize: false };
     // follow preset / index / scale changes
     for (const w of node.widgets || []) {
       if (w.type === "combo" || w.name === "index" || w.name === "strength_scale") {
@@ -104,8 +104,11 @@ app.registerExtension({
         w.callback = function (...args) { const r = orig?.apply(this, args); updateInfo(node); return r; };
       }
     }
-    if (cache.names.length) refreshCombos(node);
-    updateInfo(node);
+    // widget values arrive after nodeCreated when a workflow is loaded: refresh the panel then too
+    const origConfigure = node.onConfigure;
+    node.onConfigure = function (...args) { const r = origConfigure?.apply(this, args); updateInfo(node); return r; };
+    const paint = () => { if (cache.names.length) refreshCombos(node); updateInfo(node); };
+    if (cache.names.length) paint(); else fetchPresets(false).then(paint).catch(() => updateInfo(node));
     node.setSize([Math.max(node.size[0], 340), node.computeSize()[1]]);
   },
 });
