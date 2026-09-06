@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Build the example chain workflow from the studio's R2V API template.
+
+Produces two files in examples/:
+  chain_3seg_api.json  — API format (POST /prompt body["prompt"]); what the live check submits
+  chain_3seg.json      — UI format for the canvas (Load / drag-drop), auto-laid-out
+
+Graph = the R2V template with:
+  * ResolutionSelector + key primitive removed (literal width/height, empty key -> env key)
+  * MMX Sequence (3 preset slots, index from a PrimitiveInt with control_after_generate=increment)
+    -> model/clip into the LoRA chain, prompt into the RefPack's direction
+  * MMX Load Chain Frame (fallback = the slot-9 reference image) -> MiniMaxH3AddGuide at frame 0
+  * ImageFromBatch(-1) -> MMX Save Frame (fixed name) so the next queued run continues exactly
+
+    python3 tools/build_example.py --template "../mmx/MiniMax - R2V - Auto Prompt v6 API v2.json" --object-info oi_dir
+"""
+import argparse, copy, json, os, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(os.path.dirname(HERE), "examples")
+
+PRESETS = ["establishing", "close up", "walk"]     # slot names; edit in the node
+FIRST_IMAGE = "first_frame.png"                    # the slot-9 image in ComfyUI/input
+REF_IMAGE = "identity.png"                         # <Picture 1>
+CHAIN_FILE = "mmx_chain_last.png"
+
+
+def build_api(template: dict) -> dict:
+    p = copy.deepcopy(template)
+    p.pop("115", None); p.pop("193", None)
+    W, H = 768, 432
+    # direction comes from the sequence; references: identity + chain frame both as pictures
+    p["185"]["inputs"].update({"width": W, "height": H, "openrouter_api_key": "", "prompt_provider": "openrouter",
+                               "references_json": json.dumps({"references": [{"kind": "image", "file": REF_IMAGE}, {"kind": "image", "file": FIRST_IMAGE}]}),
+                               "direction": ["300", 2]})
+    p["184"]["inputs"].update({"width": W, "height": H})
+    p["132"]["inputs"]["value"] = 3
+    # model/clip through the sequence node before the acc / turbo LoRA chain
+    p["300"] = {"class_type": "MMXSequence", "_meta": {"title": "MMX Sequence (3 presets)"},
+                "inputs": {"model": ["135", 0], "clip": ["127", 0], "index": ["301", 0], "strength_scale": 1.0,
+                           **{f"preset_{i}": (PRESETS[i - 1] if i <= len(PRESETS) else "(none)") for i in range(1, 9)}}}
+    p["301"] = {"class_type": "PrimitiveInt", "_meta": {"title": "segment index (control_after_generate = increment)"},
+                "inputs": {"value": 0, "control_after_generate": "increment"}}
+    p["141"]["inputs"]["model"] = ["300", 0]      # ModelPreviewOverrideKJ took UNETLoader before
+    p["137"]["inputs"]["clip"] = ["300", 1]       # Power Lora Loader clip
+    # chain frame: fallback = slot-9 image; then hard guide at frame 0
+    p["302"] = {"class_type": "LoadImage", "_meta": {"title": "first frame (slot 9) — fallback for segment 1"}, "inputs": {"image": FIRST_IMAGE}}
+    p["303"] = {"class_type": "MMXLoadChainFrame", "_meta": {"title": "MMX Load Chain Frame"},
+                "inputs": {"fallback": ["302", 0], "filename": CHAIN_FILE, "use_fallback": False}}
+    p["304"] = {"class_type": "MiniMaxH3AddGuide", "_meta": {"title": "frame-0 guide"},
+                "inputs": {"positive": ["184", 0], "latent": ["184", 1], "vae": ["121", 0], "image": ["303", 0], "frame_idx": 0}}
+    p["149"]["inputs"]["conditioning"] = ["304", 0]
+    # last frame -> fixed-name save (keeps the template's SaveImage 195 as well)
+    p["305"] = {"class_type": "MMXSaveFrame", "_meta": {"title": "MMX Save Frame (chain)"}, "inputs": {"image": ["194", 0], "filename": CHAIN_FILE}}
+    p["119"]["inputs"]["filename_prefix"] = "mmx_chain/seg"
+    p["195"]["inputs"]["filename_prefix"] = "mmx_chain/last"
+    p["186"]["inputs"]["source"] = ["185", 18]
+    return p
+
+
+# ── API -> UI conversion ──────────────────────────────────────────────────────
+def load_oi(d: str) -> dict:
+    oi = {}
+    for f in os.listdir(d):
+        if f.endswith(".json"):
+            try:
+                oi.update(json.load(open(os.path.join(d, f))))
+            except Exception:
+                pass
+    return oi
+
+
+LOCAL_OI = {   # our own nodes (not in an object_info dump taken before the pack was installed)
+    "MMXSequence": {"input": {"required": {"model": ["MODEL"], "clip": ["CLIP"], "index": ["INT", {}], "strength_scale": ["FLOAT", {}],
+                                            **{f"preset_{i}": [["(none)"], {}] for i in range(1, 9)}}},
+                    "input_order": {"required": ["model", "clip", "index", "strength_scale"] + [f"preset_{i}" for i in range(1, 9)]},
+                    "output": ["MODEL", "CLIP", "STRING", "STRING", "INT", "INT"], "output_name": ["model", "clip", "prompt", "preset_name", "slot", "count"]},
+    "MMXLoadChainFrame": {"input": {"required": {"fallback": ["IMAGE"], "filename": ["STRING", {}], "use_fallback": ["BOOLEAN", {}]}},
+                          "input_order": {"required": ["fallback", "filename", "use_fallback"]}, "output": ["IMAGE", "BOOLEAN"], "output_name": ["image", "from_file"]},
+    "MMXSaveFrame": {"input": {"required": {"image": ["IMAGE"], "filename": ["STRING", {}]}}, "input_order": {"required": ["image", "filename"]},
+                     "output": ["STRING"], "output_name": ["path"]},
+}
+LINK_TYPES = {"MODEL", "CLIP", "VAE", "IMAGE", "LATENT", "CONDITIONING", "AUDIO", "SIGMAS", "NOISE", "GUIDER", "SAMPLER", "STRING", "INT", "FLOAT", "BOOLEAN", "*"}
+
+
+def to_ui(api: dict, oi: dict) -> dict:
+    oi = {**oi, **LOCAL_OI}
+    nodes, links = [], []
+    link_id = 1
+    # topological depth for layout
+    deps = {nid: [str(v[0]) for v in n["inputs"].values() if isinstance(v, list) and len(v) == 2] for nid, n in api.items()}
+    depth = {}
+    def d(nid, seen=()):
+        if nid in depth: return depth[nid]
+        if nid in seen: return 0
+        depth[nid] = 1 + max([d(x, seen + (nid,)) for x in deps.get(nid, []) if x in api] or [-1])
+        return depth[nid]
+    for nid in api: d(nid)
+    cols = {}
+    for nid in sorted(api, key=lambda x: (depth[x], int(x) if x.isdigit() else 0)):
+        cols.setdefault(depth[nid], []).append(nid)
+    pos = {}
+    for c, ids in cols.items():
+        for r, nid in enumerate(ids):
+            pos[nid] = [80 + c * 420, 80 + r * 260]
+    out_links = {}   # (src, slot) -> [link ids]
+    ui_nodes = {}
+    for nid, n in api.items():
+        cls = n["class_type"]; info = oi.get(cls)
+        if not info:
+            raise SystemExit(f"no object_info for {cls}; dump it with GET /object_info/{cls}")
+        req = info["input"].get("required", {}); opt = info["input"].get("optional", {})
+        order = (info.get("input_order") or {}).get("required", list(req)) + (info.get("input_order") or {}).get("optional", list(opt))
+        allspec = {**req, **opt}
+        inputs, widgets_values = [], []
+        for name in order:
+            spec = allspec.get(name); v = n["inputs"].get(name)
+            typ = spec[0] if spec else "*"
+            is_widget = isinstance(typ, list) or typ in ("INT", "FLOAT", "STRING", "BOOLEAN")
+            if isinstance(v, list) and len(v) == 2 and str(v[0]) in api:
+                entry = {"name": name, "type": typ if isinstance(typ, str) else "COMBO", "link": None, "_src": (str(v[0]), int(v[1]))}
+                if is_widget:
+                    entry["widget"] = {"name": name}
+                    # a widget converted to an input keeps a placeholder value in widgets_values
+                    widgets_values.append(typ[0] if isinstance(typ, list) and typ else {"INT": 0, "FLOAT": 0.0, "STRING": "", "BOOLEAN": False}.get(typ, ""))
+                inputs.append(entry)
+            elif is_widget:
+                if name in n["inputs"]:
+                    widgets_values.append(v)
+                    if spec and len(spec) > 1 and isinstance(spec[1], dict) and spec[1].get("control_after_generate") is not None and typ == "INT":
+                        widgets_values.append(spec[1].get("control_after_generate") or "fixed")
+                elif name == "control_after_generate":
+                    pass
+            else:
+                inputs.append({"name": name, "type": typ if isinstance(typ, str) else "*", "link": None})
+        # the API-format value list for dict-widgets (Power Lora Loader) is passed through
+        if cls == "Power Lora Loader (rgthree)":
+            widgets_values = [v for k, v in n["inputs"].items() if not (isinstance(v, list) and len(v) == 2 and str(v[0]) in api)]
+        elif cls == "VHS_VideoCombine":
+            widgets_values = {k: v for k, v in n["inputs"].items() if not (isinstance(v, list) and len(v) == 2 and str(v[0]) in api)}
+        elif cls == "PrimitiveInt":
+            widgets_values = [n["inputs"].get("value", 0), n["inputs"].get("control_after_generate", "fixed")]
+        elif cls == "RandomNoise":
+            widgets_values = [n["inputs"].get("noise_seed", 0), "fixed"]
+        outputs = [{"name": on, "type": ot, "links": [], "slot_index": i} for i, (on, ot) in enumerate(zip(info.get("output_name", info["output"]), info["output"]))]
+        ui_nodes[nid] = {"id": int(nid), "type": cls, "pos": pos[nid], "size": [360, 120 + 24 * (len(inputs) + len(widgets_values) if isinstance(widgets_values, list) else 8)],
+                         "flags": {}, "order": depth[nid], "mode": 0, "inputs": inputs, "outputs": outputs, "properties": {"Node name for S&R": cls},
+                         "widgets_values": widgets_values, "title": n.get("_meta", {}).get("title") or None}
+    for nid, un in ui_nodes.items():
+        for inp in un["inputs"]:
+            if "_src" in inp:
+                src, slot = inp.pop("_src")
+                lt = inp["type"] if inp["type"] not in ("COMBO", "*") else (ui_nodes[src]["outputs"][slot]["type"] if slot < len(ui_nodes[src]["outputs"]) else "*")
+                links.append([link_id, int(src), slot, int(nid), un["inputs"].index(inp), lt])
+                inp["link"] = link_id
+                if slot < len(ui_nodes[src]["outputs"]): ui_nodes[src]["outputs"][slot]["links"].append(link_id)
+                link_id += 1
+        if un["title"] is None: un.pop("title")
+        if un["widgets_values"] == []: un.pop("widgets_values")
+    return {"id": "mmx-chain-3seg", "revision": 0, "last_node_id": max(int(x) for x in api), "last_link_id": link_id - 1,
+            "nodes": [ui_nodes[k] for k in sorted(ui_nodes, key=int)], "links": links, "groups": [], "config": {}, "extra": {}, "version": 0.4}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--template", required=True); ap.add_argument("--object-info", required=True)
+    a = ap.parse_args()
+    os.makedirs(OUT, exist_ok=True)
+    api = build_api(json.load(open(a.template)))
+    json.dump(api, open(os.path.join(OUT, "chain_3seg_api.json"), "w"), indent=1)
+    ui = to_ui(api, load_oi(a.object_info))
+    json.dump(ui, open(os.path.join(OUT, "chain_3seg.json"), "w"), indent=1)
+    print(f"wrote {OUT}/chain_3seg_api.json ({len(api)} nodes) and chain_3seg.json ({len(ui['links'])} links)")
+
+
+if __name__ == "__main__":
+    main()
