@@ -91,6 +91,27 @@ To start a new chain, tick `use_fallback` on MMX Load Chain Frame for the first 
 Put `identity.png` (`<Picture 1>`) and `first_frame.png` (slot 9) into ComfyUI's `input`
 folder before queueing, or point the two LoadImage nodes at your own files.
 
+## Verified 2026-09-06 (live, RTX PRO 6000, ComfyUI 0.34, frontend 1.49.6)
+
+- Pack loads with no errors (5 nodes registered, routes under `/mmx/`, extension served).
+- Studio pool import → 3 presets; `MMX Preset Save` queued as a prompt → 4th preset; Refresh
+  re-reads the store and `MMX Preset`'s dropdown lists it; the NAS copy holds all four.
+- Presets survive a runner restart; deleting `/workspace/mmx/presets.json` and pressing Refresh
+  restored all four from the NAS (`pull merged 4`).
+- `examples/chain_3seg.json` loads in the frontend with no missing node types; queued three times
+  with index 0/1/2 (768×448, 3 s each, auto-prompt on) it selected establishing / close up / walk,
+  applied their LoRAs (0.6 / — / 0.8) and rewrote `mmx_chain_last.png` after each run. Joins:
+
+  | pair | PSNR |
+  |---|---|
+  | segment 1 → 2 (last frame vs first frame) | 33.3 dB |
+  | segment 2 → 3 | 33.5 dB |
+  | adjacent frames inside one segment (reference) | 27.7 dB |
+  | segment 1 last vs segment 3 first (non-adjacent control) | 16.8 dB |
+  | segment 1 frame 0 vs the slot-9 image (cover-cropped) | 31.3 dB |
+
+  A join is closer than two consecutive frames of the same clip, i.e. no visible cut.
+
 ## Runner integration
 
 `mmx_runner.py` (≥ 2.4) reads the same store: a segment may say `"preset": "walk"` instead of
