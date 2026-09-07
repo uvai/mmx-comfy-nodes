@@ -1,8 +1,8 @@
 {
- "id": "mmx-chain-3seg",
+ "id": "mmx-chain-check",
  "revision": 0,
- "last_node_id": 305,
- "last_link_id": 39,
+ "last_node_id": 321,
+ "last_link_id": 47,
  "nodes": [
   {
    "id": 119,
@@ -87,7 +87,7 @@
      "links": [
       4,
       22,
-      37
+      38
      ],
      "slot_index": 0
     }
@@ -155,7 +155,7 @@
      "type": "CLIP",
      "links": [
       19,
-      32
+      33
      ],
      "slot_index": 0
     }
@@ -190,7 +190,7 @@
      "name": "FLOAT",
      "type": "FLOAT",
      "links": [
-      25
+      26
      ],
      "slot_index": 0
     }
@@ -235,7 +235,9 @@
      "type": "IMAGE",
      "links": [
       1,
-      29
+      30,
+      44,
+      46
      ],
      "slot_index": 0
     }
@@ -306,7 +308,7 @@
      "name": "MODEL",
      "type": "MODEL",
      "links": [
-      31
+      32
      ],
      "slot_index": 0
     }
@@ -443,7 +445,7 @@
    "id": 149,
    "type": "BasicGuider",
    "pos": [
-    2180,
+    2600,
     80
    ],
    "size": [
@@ -451,7 +453,7 @@
     168
    ],
    "flags": {},
-   "order": 5,
+   "order": 6,
    "mode": 0,
    "inputs": [
     {
@@ -640,7 +642,7 @@
      "type": "MODEL",
      "links": [
       11,
-      28
+      29
      ],
      "slot_index": 0
     }
@@ -710,7 +712,7 @@
    "id": 184,
    "type": "MiniMaxH3ReferenceToVideo",
    "pos": [
-    1340,
+    1760,
     340
    ],
    "size": [
@@ -718,7 +720,7 @@
     456
    ],
    "flags": {},
-   "order": 3,
+   "order": 4,
    "mode": 0,
    "inputs": [
     {
@@ -783,7 +785,7 @@
      "name": "positive",
      "type": "CONDITIONING",
      "links": [
-      35
+      36
      ],
      "slot_index": 0
     },
@@ -792,7 +794,7 @@
      "type": "LATENT",
      "links": [
       17,
-      36
+      37
      ],
      "slot_index": 1
     }
@@ -812,15 +814,15 @@
    "id": 185,
    "type": "MiniMaxH3ReferencePack",
    "pos": [
-    920,
+    1340,
     340
    ],
    "size": [
     360,
-    504
+    528
    ],
    "flags": {},
-   "order": 2,
+   "order": 3,
    "mode": 0,
    "inputs": [
     {
@@ -832,9 +834,17 @@
      }
     },
     {
+     "name": "references_json",
+     "type": "STRING",
+     "link": 25,
+     "widget": {
+      "name": "references_json"
+     }
+    },
+    {
      "name": "length_seconds",
      "type": "FLOAT",
-     "link": 25,
+     "link": 26,
      "widget": {
       "name": "length_seconds"
      }
@@ -954,7 +964,7 @@
      "type": "STRING",
      "links": [
       20,
-      26
+      27
      ],
      "slot_index": 18
     },
@@ -970,7 +980,7 @@
    },
    "widgets_values": [
     "",
-    "{\"references\": [{\"kind\": \"image\", \"file\": \"identity.png\"}, {\"kind\": \"image\", \"file\": \"first_frame.png\"}]}",
+    "",
     "",
     "openrouter",
     "",
@@ -990,7 +1000,7 @@
    "id": 186,
    "type": "Display Any (rgthree)",
    "pos": [
-    1340,
+    1760,
     600
    ],
    "size": [
@@ -998,13 +1008,13 @@
     144
    ],
    "flags": {},
-   "order": 3,
+   "order": 4,
    "mode": 0,
    "inputs": [
     {
      "name": "source",
      "type": "*",
-     "link": 26
+     "link": 27
     }
    ],
    "outputs": [],
@@ -1018,7 +1028,7 @@
    "type": "ExtendIntermediateSigmas",
    "pos": [
     2600,
-    80
+    340
    ],
    "size": [
     360,
@@ -1031,7 +1041,7 @@
     {
      "name": "sigmas",
      "type": "SIGMAS",
-     "link": 27
+     "link": 28
     },
     {
      "name": "spacing",
@@ -1064,7 +1074,7 @@
    "type": "BetaSamplingScheduler",
    "pos": [
     2180,
-    340
+    80
    ],
    "size": [
     360,
@@ -1077,7 +1087,7 @@
     {
      "name": "model",
      "type": "MODEL",
-     "link": 28
+     "link": 29
     }
    ],
    "outputs": [
@@ -1085,7 +1095,7 @@
      "name": "SIGMAS",
      "type": "SIGMAS",
      "links": [
-      27
+      28
      ],
      "slot_index": 0
     }
@@ -1118,7 +1128,7 @@
     {
      "name": "image",
      "type": "IMAGE",
-     "link": 29
+     "link": 30
     }
    ],
    "outputs": [
@@ -1126,8 +1136,7 @@
      "name": "IMAGE",
      "type": "IMAGE",
      "links": [
-      30,
-      39
+      31
      ],
      "slot_index": 0
     }
@@ -1159,7 +1168,7 @@
     {
      "name": "images",
      "type": "IMAGE",
-     "link": 30
+     "link": 31
     }
    ],
    "outputs": [
@@ -1196,17 +1205,17 @@
     {
      "name": "model",
      "type": "MODEL",
-     "link": 31
+     "link": 32
     },
     {
      "name": "clip",
      "type": "CLIP",
-     "link": 32
+     "link": 33
     },
     {
      "name": "index",
      "type": "INT",
-     "link": 33,
+     "link": 34,
      "widget": {
       "name": "index"
      }
@@ -1233,7 +1242,7 @@
      "name": "prompt",
      "type": "STRING",
      "links": [
-      24
+      42
      ],
      "slot_index": 2
     },
@@ -1294,7 +1303,7 @@
      "name": "INT",
      "type": "INT",
      "links": [
-      33
+      34
      ],
      "slot_index": 0
     }
@@ -1307,45 +1316,6 @@
     "increment"
    ],
    "title": "segment index (control_after_generate = increment)"
-  },
-  {
-   "id": 302,
-   "type": "LoadImage",
-   "pos": [
-    80,
-    2160
-   ],
-   "size": [
-    360,
-    144
-   ],
-   "flags": {},
-   "order": 0,
-   "mode": 0,
-   "inputs": [],
-   "outputs": [
-    {
-     "name": "IMAGE",
-     "type": "IMAGE",
-     "links": [
-      34
-     ],
-     "slot_index": 0
-    },
-    {
-     "name": "MASK",
-     "type": "MASK",
-     "links": [],
-     "slot_index": 1
-    }
-   ],
-   "properties": {
-    "Node name for S&R": "LoadImage"
-   },
-   "widgets_values": [
-    "first_frame.png"
-   ],
-   "title": "first frame (slot 9) \u2014 fallback for segment 1"
   },
   {
    "id": 303,
@@ -1365,7 +1335,7 @@
     {
      "name": "fallback",
      "type": "IMAGE",
-     "link": 34
+     "link": 35
     }
    ],
    "outputs": [
@@ -1373,7 +1343,8 @@
      "name": "image",
      "type": "IMAGE",
      "links": [
-      38
+      39,
+      45
      ],
      "slot_index": 0
     },
@@ -1397,7 +1368,7 @@
    "id": 304,
    "type": "MiniMaxH3AddGuide",
    "pos": [
-    1760,
+    2180,
     340
    ],
    "size": [
@@ -1405,23 +1376,23 @@
     288
    ],
    "flags": {},
-   "order": 4,
+   "order": 5,
    "mode": 0,
    "inputs": [
     {
      "name": "positive",
      "type": "CONDITIONING",
-     "link": 35
+     "link": 36
     },
     {
      "name": "latent",
      "type": "LATENT",
-     "link": 36
+     "link": 37
     },
     {
      "name": "vae",
      "type": "VAE",
-     "link": 37
+     "link": 38
     },
     {
      "name": "audio_vae",
@@ -1431,7 +1402,7 @@
     {
      "name": "image",
      "type": "IMAGE",
-     "link": 38
+     "link": 39
     },
     {
      "name": "audio",
@@ -1458,24 +1429,306 @@
    "title": "frame-0 guide"
   },
   {
-   "id": 305,
-   "type": "MMXSaveFrame",
+   "id": 310,
+   "type": "MMXLibraryImage",
+   "pos": [
+    80,
+    2160
+   ],
+   "size": [
+    360,
+    144
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "image",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    },
+    {
+     "name": "filename",
+     "type": "STRING",
+     "links": [
+      40
+     ],
+     "slot_index": 1
+    },
+    {
+     "name": "path",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MMXLibraryImage"
+   },
+   "widgets_values": [
+    "Subjects/j/identity.png"
+   ],
+   "title": "MMX Library Image \u2014 identity (<Picture 1>)"
+  },
+  {
+   "id": 311,
+   "type": "MMXLibraryImage",
+   "pos": [
+    80,
+    2420
+   ],
+   "size": [
+    360,
+    144
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "image",
+     "type": "IMAGE",
+     "links": [
+      35
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "filename",
+     "type": "STRING",
+     "links": [
+      41
+     ],
+     "slot_index": 1
+    },
+    {
+     "name": "path",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MMXLibraryImage"
+   },
+   "widgets_values": [
+    "Sets/room/first_frame.png"
+   ],
+   "title": "MMX Library Image \u2014 first frame (slot 9)"
+  },
+  {
+   "id": 312,
+   "type": "MMXReferencesBuilder",
+   "pos": [
+    500,
+    860
+   ],
+   "size": [
+    360,
+    504
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "image_1",
+     "type": "STRING",
+     "link": 40,
+     "widget": {
+      "name": "image_1"
+     }
+    },
+    {
+     "name": "image_9",
+     "type": "STRING",
+     "link": 41,
+     "widget": {
+      "name": "image_9"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "references_json",
+     "type": "STRING",
+     "links": [
+      25
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "picture_map",
+     "type": "STRING",
+     "links": [
+      43
+     ],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MMXReferencesBuilder"
+   },
+   "widgets_values": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    true
+   ],
+   "title": "MMX References Builder"
+  },
+  {
+   "id": 313,
+   "type": "StringConcatenate",
+   "pos": [
+    920,
+    340
+   ],
+   "size": [
+    360,
+    240
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "string_a",
+     "type": "STRING",
+     "link": 42,
+     "widget": {
+      "name": "string_a"
+     }
+    },
+    {
+     "name": "string_b",
+     "type": "STRING",
+     "link": 43,
+     "widget": {
+      "name": "string_b"
+     }
+    }
+   ],
+   "outputs": [
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": [
+      24
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "StringConcatenate"
+   },
+   "widgets_values": [
+    "",
+    "",
+    "\n"
+   ],
+   "title": "prompt + picture map"
+  },
+  {
+   "id": 320,
+   "type": "MMXFirstFrameCheck",
+   "pos": [
+    3860,
+    600
+   ],
+   "size": [
+    360,
+    192
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 44
+    },
+    {
+     "name": "reference",
+     "type": "IMAGE",
+     "link": 45
+    }
+   ],
+   "outputs": [
+    {
+     "name": "psnr",
+     "type": "FLOAT",
+     "links": [],
+     "slot_index": 0
+    },
+    {
+     "name": "ssim",
+     "type": "FLOAT",
+     "links": [],
+     "slot_index": 1
+    },
+    {
+     "name": "passed",
+     "type": "BOOLEAN",
+     "links": [
+      47
+     ],
+     "slot_index": 2
+    },
+    {
+     "name": "comparison",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 3
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MMXFirstFrameCheck"
+   },
+   "widgets_values": [
+    24.0
+   ],
+   "title": "MMX First Frame Check"
+  },
+  {
+   "id": 321,
+   "type": "MMXChainGate",
    "pos": [
     4280,
     340
    ],
    "size": [
     360,
-    168
+    216
    ],
    "flags": {},
    "order": 10,
    "mode": 0,
    "inputs": [
     {
-     "name": "image",
+     "name": "images",
      "type": "IMAGE",
-     "link": 39
+     "link": 46
+    },
+    {
+     "name": "passed",
+     "type": "BOOLEAN",
+     "link": 47
     }
    ],
    "outputs": [
@@ -1484,15 +1737,22 @@
      "type": "STRING",
      "links": [],
      "slot_index": 0
+    },
+    {
+     "name": "written",
+     "type": "BOOLEAN",
+     "links": [],
+     "slot_index": 1
     }
    ],
    "properties": {
-    "Node name for S&R": "MMXSaveFrame"
+    "Node name for S&R": "MMXChainGate"
    },
    "widgets_values": [
-    "mmx_chain_last.png"
+    "mmx_chain_last.png",
+    true
    ],
-   "title": "MMX Save Frame (chain)"
+   "title": "MMX Chain Gate -> next segment"
   }
  ],
  "links": [
@@ -1682,22 +1942,30 @@
   ],
   [
    24,
-   300,
-   2,
+   313,
+   0,
    185,
    0,
    "STRING"
   ],
   [
    25,
-   132,
+   312,
    0,
    185,
    1,
-   "FLOAT"
+   "STRING"
   ],
   [
    26,
+   132,
+   0,
+   185,
+   2,
+   "FLOAT"
+  ],
+  [
+   27,
    185,
    18,
    186,
@@ -1705,7 +1973,7 @@
    "STRING"
   ],
   [
-   27,
+   28,
    190,
    0,
    189,
@@ -1713,7 +1981,7 @@
    "SIGMAS"
   ],
   [
-   28,
+   29,
    158,
    0,
    190,
@@ -1721,7 +1989,7 @@
    "MODEL"
   ],
   [
-   29,
+   30,
    133,
    0,
    194,
@@ -1729,7 +1997,7 @@
    "IMAGE"
   ],
   [
-   30,
+   31,
    194,
    0,
    195,
@@ -1737,7 +2005,7 @@
    "IMAGE"
   ],
   [
-   31,
+   32,
    135,
    0,
    300,
@@ -1745,7 +2013,7 @@
    "MODEL"
   ],
   [
-   32,
+   33,
    127,
    0,
    300,
@@ -1753,7 +2021,7 @@
    "CLIP"
   ],
   [
-   33,
+   34,
    301,
    0,
    300,
@@ -1761,15 +2029,15 @@
    "INT"
   ],
   [
-   34,
-   302,
+   35,
+   311,
    0,
    303,
    0,
    "IMAGE"
   ],
   [
-   35,
+   36,
    184,
    0,
    304,
@@ -1777,7 +2045,7 @@
    "CONDITIONING"
   ],
   [
-   36,
+   37,
    184,
    1,
    304,
@@ -1785,7 +2053,7 @@
    "LATENT"
   ],
   [
-   37,
+   38,
    121,
    0,
    304,
@@ -1793,7 +2061,7 @@
    "VAE"
   ],
   [
-   38,
+   39,
    303,
    0,
    304,
@@ -1801,12 +2069,68 @@
    "IMAGE"
   ],
   [
-   39,
-   194,
+   40,
+   310,
+   1,
+   312,
    0,
-   305,
+   "STRING"
+  ],
+  [
+   41,
+   311,
+   1,
+   312,
+   1,
+   "STRING"
+  ],
+  [
+   42,
+   300,
+   2,
+   313,
+   0,
+   "STRING"
+  ],
+  [
+   43,
+   312,
+   1,
+   313,
+   1,
+   "STRING"
+  ],
+  [
+   44,
+   133,
+   0,
+   320,
    0,
    "IMAGE"
+  ],
+  [
+   45,
+   303,
+   0,
+   320,
+   1,
+   "IMAGE"
+  ],
+  [
+   46,
+   133,
+   0,
+   321,
+   0,
+   "IMAGE"
+  ],
+  [
+   47,
+   320,
+   2,
+   321,
+   1,
+   "BOOLEAN"
   ]
  ],
  "groups": [],

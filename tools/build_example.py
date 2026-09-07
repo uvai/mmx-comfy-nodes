@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Build the example chain workflow from the studio's R2V API template.
 
-Produces two files in examples/:
+Produces four files in examples/:
   chain_3seg_api.json  — API format (POST /prompt body["prompt"]); what the live check submits
   chain_3seg.json      — UI format for the canvas (Load / drag-drop), auto-laid-out
+  chain_check_api.json / chain_check.json — the same chain with the library + verification nodes:
+      MMX Library Image x2 -> MMX References Builder -> References Manager (references_json +
+      picture_map appended to the preset prompt), MMX Load Chain Frame -> MiniMaxH3AddGuide,
+      MMX First Frame Check on the decoded frames -> MMX Chain Gate writing the next segment's
+      frame only when the check passed
 
 Graph = the R2V template with:
   * ResolutionSelector + key primitive removed (literal width/height, empty key -> env key)
@@ -23,6 +28,9 @@ PRESETS = ["establishing", "close up", "walk"]     # slot names; edit in the nod
 FIRST_IMAGE = "first_frame.png"                    # the slot-9 image in ComfyUI/input
 REF_IMAGE = "identity.png"                         # <Picture 1>
 CHAIN_FILE = "mmx_chain_last.png"
+LIB_IDENTITY = "Subjects/j/identity.png"     # library paths (relative to /workspace/mmx/library); pick yours in the node
+LIB_FIRST = "Sets/room/first_frame.png"
+THRESHOLD_DB = 24.0
 
 
 def build_api(template: dict) -> dict:
@@ -58,6 +66,25 @@ def build_api(template: dict) -> dict:
     return p
 
 
+def build_check_api(template: dict) -> dict:
+    """chain_3seg + library / references / first-frame verification."""
+    p = build_api(template)
+    p.pop("302"); p.pop("305")                       # LoadImage fallback + fixed-name save: replaced below
+    p["310"] = {"class_type": "MMXLibraryImage", "_meta": {"title": "MMX Library Image — identity (<Picture 1>)"}, "inputs": {"file": LIB_IDENTITY}}
+    p["311"] = {"class_type": "MMXLibraryImage", "_meta": {"title": "MMX Library Image — first frame (slot 9)"}, "inputs": {"file": LIB_FIRST}}
+    p["312"] = {"class_type": "MMXReferencesBuilder", "_meta": {"title": "MMX References Builder"},
+                "inputs": {"image_1": ["310", 1], "image_9": ["311", 1], "use_soundtrack": True}}
+    p["313"] = {"class_type": "StringConcatenate", "_meta": {"title": "prompt + picture map"},
+                "inputs": {"string_a": ["300", 2], "string_b": ["312", 1], "delimiter": "\n"}}
+    p["185"]["inputs"].update({"references_json": ["312", 0], "direction": ["313", 0]})
+    p["303"]["inputs"]["fallback"] = ["311", 0]      # segment 1 opens on the slot-9 image, later ones on the gated frame
+    p["320"] = {"class_type": "MMXFirstFrameCheck", "_meta": {"title": "MMX First Frame Check"},
+                "inputs": {"images": ["133", 0], "reference": ["303", 0], "threshold_db": THRESHOLD_DB}}
+    p["321"] = {"class_type": "MMXChainGate", "_meta": {"title": "MMX Chain Gate -> next segment"},
+                "inputs": {"images": ["133", 0], "passed": ["320", 2], "filename": CHAIN_FILE, "stop_queue": True}}
+    return p
+
+
 # ── API -> UI conversion ──────────────────────────────────────────────────────
 def load_oi(d: str) -> dict:
     oi = {}
@@ -79,11 +106,25 @@ LOCAL_OI = {   # our own nodes (not in an object_info dump taken before the pack
                           "input_order": {"required": ["fallback", "filename", "use_fallback"]}, "output": ["IMAGE", "BOOLEAN"], "output_name": ["image", "from_file"]},
     "MMXSaveFrame": {"input": {"required": {"image": ["IMAGE"], "filename": ["STRING", {}]}}, "input_order": {"required": ["image", "filename"]},
                      "output": ["STRING"], "output_name": ["path"]},
+    "MMXLibraryImage": {"input": {"required": {"file": [[LIB_IDENTITY, LIB_FIRST], {}]}}, "input_order": {"required": ["file"]},
+                        "output": ["IMAGE", "STRING", "STRING"], "output_name": ["image", "filename", "path"]},
+    "MMXReferencesBuilder": {"input": {"required": {}, "optional": {**{f"image_{i}": ["STRING", {}] for i in range(1, 10)}, **{f"video_{i}": ["STRING", {}] for i in range(1, 4)},
+                                                                    "audio_1": ["STRING", {}], "use_soundtrack": ["BOOLEAN", {}]}},
+                             "input_order": {"required": [], "optional": [f"image_{i}" for i in range(1, 10)] + [f"video_{i}" for i in range(1, 4)] + ["audio_1", "use_soundtrack"]},
+                             "output": ["STRING", "STRING"], "output_name": ["references_json", "picture_map"]},
+    "MMXFirstFrameCheck": {"input": {"required": {"images": ["IMAGE"], "reference": ["IMAGE"], "threshold_db": ["FLOAT", {}]}},
+                           "input_order": {"required": ["images", "reference", "threshold_db"]},
+                           "output": ["FLOAT", "FLOAT", "BOOLEAN", "IMAGE"], "output_name": ["psnr", "ssim", "passed", "comparison"]},
+    "MMXChainGate": {"input": {"required": {"images": ["IMAGE"], "passed": ["BOOLEAN", {"forceInput": True}], "filename": ["STRING", {}]}, "optional": {"stop_queue": ["BOOLEAN", {}]}},
+                     "input_order": {"required": ["images", "passed", "filename"], "optional": ["stop_queue"]},
+                     "output": ["STRING", "BOOLEAN"], "output_name": ["path", "written"]},
+    "StringConcatenate": {"input": {"required": {"string_a": ["STRING", {}], "string_b": ["STRING", {}], "delimiter": ["STRING", {}]}},
+                          "input_order": {"required": ["string_a", "string_b", "delimiter"]}, "output": ["STRING"], "output_name": ["STRING"]},
 }
 LINK_TYPES = {"MODEL", "CLIP", "VAE", "IMAGE", "LATENT", "CONDITIONING", "AUDIO", "SIGMAS", "NOISE", "GUIDER", "SAMPLER", "STRING", "INT", "FLOAT", "BOOLEAN", "*"}
 
 
-def to_ui(api: dict, oi: dict) -> dict:
+def to_ui(api: dict, oi: dict, wid: str = "mmx-chain-3seg") -> dict:
     oi = {**LOCAL_OI, **oi}   # a real object_info dump (taken with the pack installed) wins over the built-in stubs
     nodes, links = [], []
     link_id = 1
@@ -116,7 +157,7 @@ def to_ui(api: dict, oi: dict) -> dict:
         for name in order:
             spec = allspec.get(name); v = n["inputs"].get(name)
             typ = spec[0] if spec else "*"
-            is_widget = isinstance(typ, list) or typ in ("INT", "FLOAT", "STRING", "BOOLEAN")
+            is_widget = (isinstance(typ, list) or typ in ("INT", "FLOAT", "STRING", "BOOLEAN")) and not (spec and len(spec) > 1 and isinstance(spec[1], dict) and spec[1].get("forceInput"))
             if isinstance(v, list) and len(v) == 2 and str(v[0]) in api:
                 entry = {"name": name, "type": typ if isinstance(typ, str) else "COMBO", "link": None, "_src": (str(v[0]), int(v[1]))}
                 if is_widget:
@@ -130,10 +171,12 @@ def to_ui(api: dict, oi: dict) -> dict:
             elif is_widget:
                 if name in n["inputs"]:
                     widgets_values.append(v)
-                    if spec and len(spec) > 1 and isinstance(spec[1], dict) and spec[1].get("control_after_generate") is not None and typ in ("INT", "FLOAT"):
-                        widgets_values.append(spec[1].get("control_after_generate") or "fixed")
-                elif name == "control_after_generate":
-                    pass
+                elif name != "control_after_generate":
+                    # an unset optional widget still occupies its positional slot: use the spec default
+                    opts = spec[1] if spec and len(spec) > 1 and isinstance(spec[1], dict) else {}
+                    widgets_values.append(opts.get("default", typ[0] if isinstance(typ, list) and typ else {"INT": 0, "FLOAT": 0.0, "STRING": "", "BOOLEAN": False}.get(typ, "")))
+                if name != "control_after_generate" and spec and len(spec) > 1 and isinstance(spec[1], dict) and spec[1].get("control_after_generate") is not None and typ in ("INT", "FLOAT"):
+                    widgets_values.append(spec[1].get("control_after_generate") or "fixed")
             else:
                 inputs.append({"name": name, "type": typ if isinstance(typ, str) else "*", "link": None})
         # the API-format value list for dict-widgets (Power Lora Loader) is passed through
@@ -160,7 +203,7 @@ def to_ui(api: dict, oi: dict) -> dict:
                 link_id += 1
         if un["title"] is None: un.pop("title")
         if un["widgets_values"] == []: un.pop("widgets_values")
-    return {"id": "mmx-chain-3seg", "revision": 0, "last_node_id": max(int(x) for x in api), "last_link_id": link_id - 1,
+    return {"id": wid, "revision": 0, "last_node_id": max(int(x) for x in api), "last_link_id": link_id - 1,
             "nodes": [ui_nodes[k] for k in sorted(ui_nodes, key=int)], "links": links, "groups": [], "config": {}, "extra": {}, "version": 0.4}
 
 
@@ -169,11 +212,14 @@ def main():
     ap.add_argument("--template", required=True); ap.add_argument("--object-info", required=True)
     a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
-    api = build_api(json.load(open(a.template)))
-    json.dump(api, open(os.path.join(OUT, "chain_3seg_api.json"), "w"), indent=1)
-    ui = to_ui(api, load_oi(a.object_info))
-    json.dump(ui, open(os.path.join(OUT, "chain_3seg.json"), "w"), indent=1)
-    print(f"wrote {OUT}/chain_3seg_api.json ({len(api)} nodes) and chain_3seg.json ({len(ui['links'])} links)")
+    oi = load_oi(a.object_info)
+    template = json.load(open(a.template))
+    for name, builder in (("chain_3seg", build_api), ("chain_check", build_check_api)):
+        api = builder(template)
+        json.dump(api, open(os.path.join(OUT, f"{name}_api.json"), "w"), indent=1)
+        ui = to_ui(api, oi, "mmx-" + name.replace("_", "-"))
+        json.dump(ui, open(os.path.join(OUT, f"{name}.json"), "w"), indent=1)
+        print(f"wrote {OUT}/{name}_api.json ({len(api)} nodes) and {name}.json ({len(ui['links'])} links)")
 
 
 if __name__ == "__main__":

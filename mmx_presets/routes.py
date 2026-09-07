@@ -9,12 +9,17 @@ button and by tooling:
   POST /mmx/presets/delete          -> body: {name}
   GET  /mmx/presets/status          -> store path + mirror status
   GET  /mmx/loras                   -> current models/loras listing (for the extension)
+  GET  /mmx/library                 -> {root, items:[{path, name, folder, kind, size, mtime}], count, sync}
+  POST /mmx/library/refresh[?sync=1]-> re-scan the mirror (sync=1: start the NAS mirror script first)
+  GET  /mmx/library/thumb?path=<rel>[&w=320] -> image/jpeg (first frame for videos)
+  GET  /mmx/library/sync            -> mirror script status + log tail
 """
 from __future__ import annotations
 
 import json
 
 from . import store as S
+from . import library as L
 
 
 def _payload(st: S.PresetStore) -> dict:
@@ -89,5 +94,35 @@ def register(server_instance) -> bool:
         except Exception:
             names = []
         return web.json_response({"loras": names})
+
+    def _library_payload():
+        items = L.scan()
+        return {"root": L.root(), "items": items, "count": len(items), "paths": [it["path"] for it in items], "sync": L.sync_status()}
+
+    @routes.get("/mmx/library")
+    async def library_get(request):
+        return web.json_response(_library_payload())
+
+    @routes.post("/mmx/library/refresh")
+    async def library_refresh(request):
+        out = {}
+        if request.query.get("sync") == "1":
+            out["sync_started"] = L.start_sync()
+        L.scan(force=True)
+        out.update(_library_payload())
+        return web.json_response(out)
+
+    @routes.get("/mmx/library/sync")
+    async def library_sync(request):
+        return web.json_response(L.sync_status())
+
+    @routes.get("/mmx/library/thumb")
+    async def library_thumb(request):
+        try:
+            w = max(64, min(1024, int(request.query.get("w", "320"))))
+            data = L.thumb_jpeg(request.query.get("path", ""), w)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=404)
+        return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "max-age=60"})
 
     return True

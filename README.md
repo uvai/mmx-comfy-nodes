@@ -50,6 +50,10 @@ unless `--overwrite`.
 | **MMX Sequence** | model, clip, index INT, strength_scale, preset_1..preset_8 | model, clip, prompt, preset_name, slot, count — empty slots skipped, index wraps over the filled ones |
 | **MMX Save Frame (fixed name)** | image, filename | writes the LAST image of the batch as `input/<filename>.png`, overwriting (OUTPUT_NODE) |
 | **MMX Load Chain Frame** | fallback IMAGE, filename, use_fallback | the saved frame when it exists, else the fallback; re-executes when the file changes |
+| **MMX First Frame Check** | images (VAE Decode batch), reference IMAGE (slot-9 image or previous last frame), threshold_db (24) | psnr FLOAT, ssim FLOAT, passed BOOLEAN, comparison IMAGE (reference \| frame 0 \| abs-diff heat-map, labelled); OUTPUT_NODE — numbers + PASS/FAIL shown in the node, strip previewed |
+| **MMX Chain Gate** | images, passed BOOLEAN, filename (`mmx_chain_last.png`), stop_queue | path STRING, written BOOLEAN. passed → writes the LAST frame to `input/<filename>` (overwrite). not passed → writes `<stem>_REJECTED.png`, leaves the previous good frame untouched, clears the pending queue and raises `MMX Chain Gate: first-frame check FAILED …` |
+| **MMX Library Image** | file (dropdown over `/workspace/mmx/library/{Subjects,VideoRef,Sets}/**`) | image IMAGE (mp4: first frame), filename STRING (the file copied into `ComfyUI/input` as `Subjects__j__j1.jpg`, for the References Manager), path STRING |
+| **MMX References Builder** | image_1..9, video_1..3, audio_1 (STRING, optional), use_soundtrack | references_json STRING (exact `MiniMaxH3ReferencePack` schema, compacted in slot order), picture_map STRING (`slot 9 -> <Picture 5>`, `video 1 -> <Video 1> (+ soundtrack <Audio 1>)`) |
 
 Selecting a preset changes the prompt and the LoRA stack together: the node re-executes whenever
 the preset's content changes (`IS_CHANGED` hashes name, prompt, loras, updated). A LoRA file
@@ -63,7 +67,83 @@ the current index resolves to.
 
 HTTP routes on ComfyUI's port: `GET /mmx/presets`, `POST /mmx/presets/refresh`,
 `POST /mmx/presets/import[?overwrite=1]`, `POST /mmx/presets/save`, `POST /mmx/presets/delete`,
-`GET /mmx/presets/status`, `GET /mmx/loras`.
+`GET /mmx/presets/status`, `GET /mmx/loras`, `GET /mmx/library`, `POST /mmx/library/refresh[?sync=1]`,
+`GET /mmx/library/thumb?path=<rel>[&w=320]`, `GET /mmx/library/sync`.
+
+## First-frame verification (the check + gate pair)
+
+`MMX First Frame Check` measures frame 0 of the decoded batch against the intended first frame
+**in the guide's geometry**: the reference is cover-cropped (centre) to the frame's aspect and
+lanczos-resized to the frame's size exactly as `MiniMaxH3AddGuide` does
+(`comfy.utils.common_upscale(…, "lanczos", "center")` — the node calls the same function inside
+ComfyUI). PSNR is over RGB in 0..1 (identical images report 100 dB), SSIM is Wang et al. on luma
+with an 11×11 σ=1.5 window. `passed = psnr >= threshold_db`. The comparison strip is written to
+the temp folder and previewed in the node; the abs-diff panel saturates at a mean per-pixel
+difference of 0.25.
+
+Calibration from the live joins (768×448, guide continuation): a correct reference measures
+29–33 dB, adjacent frames of one clip 22–28 dB, an unrelated image < 15 dB. 24 dB is the default
+threshold.
+
+`MMX Chain Gate` takes that `passed` flag: only a passing segment overwrites `input/<filename>`
+(the frame `MMX Load Chain Frame` / `LoadImage` reads for the next segment). A failing segment
+writes `<stem>_REJECTED.png` for inspection, keeps the previous good frame byte-identical, clears
+the pending queue (`stop_queue`, default on — the remaining segments would otherwise run from the
+stale frame) and raises with the paths in the message; the node body shows the verdict either
+way (a websocket event carries it before the exception aborts the node's normal ui output).
+
+## Library (MMX Library Image)
+
+`/workspace/mmx/library` (env `MMX_LIBRARY` overrides) mirrors `Subjects`, `VideoRef` and `Sets`
+from `/volume1/subgenula` at boot: `additional_params.sh` section 3c copies
+`tools/mmx_library_sync.sh` to `/root/mmx_library_sync.sh` and runs it detached with `--wait`
+(it waits up to 10 min for the nas_worker to bring up tailscale + `/root/.ssh/mmx_nas_key`, then
+`rsync -rt --delete --max-size 1500m` per folder over the same SOCKS ssh path). A locked share,
+a missing key or an unreachable NAS is a logged skip (`/workspace/mmx_library_sync.log`), exit 0;
+the node keeps working on whatever is mirrored. Folders absent on the share (`Sets`) are skipped.
+
+In the node: the dropdown lists every image / video under the mirror as `Folder/sub/file`; the
+`search` box filters it live; the thumbnail (first frame for videos) is drawn in the node;
+`↻ Refresh library` re-scans without a page reload; `⇣ Mirror from NAS` re-runs the sync script
+and re-scans when it finishes (progress from the log tail on the button). A file picked after a
+Refresh queues fine: the node validates the path itself instead of the enum ComfyUI cached at
+load. Executing copies the file into `ComfyUI/input` under its flat name (skipped when an
+identical copy is there), so the References Manager can address it by filename.
+
+## Example: `examples/chain_check.json`
+
+`chain_3seg` plus the library + verification nodes (`tools/build_example.py` writes both):
+
+1. **MMX Library Image ×2** (identity → `<Picture 1>`, the first-frame image → slot 9) →
+   **MMX References Builder** → `references_json` into the **References Manager** (the RefPack's
+   hidden widget accepts the link); `picture_map` is appended to the sequence's prompt with a
+   `StringConcatenate` so the LLM sees which picture is the first frame.
+2. The slot-9 image is also the fallback of **MMX Load Chain Frame** → **MiniMaxH3AddGuide** at
+   frame 0: segment 1 opens exactly on it, later segments on the gated frame.
+3. **MMX First Frame Check** compares the decoded frame 0 with the very image the guide anchored
+   (the Load Chain Frame output) → **MMX Chain Gate** writes `mmx_chain_last.png` only on PASS.
+4. Queue N runs as before; a failed join stops the chain at that segment with a red node and
+   `mmx_chain_last_REJECTED.png` in `input/`.
+
+Pick your own library files in the two dropdowns (the example carries placeholder paths).
+
+## Verification
+
+- `python3 tests/test_pack.py` — 52 checks with ComfyUI stubbed (check / gate / library /
+  references need torch + PIL, the mp4 case ffmpeg).
+- `python3 tools/live_check.py --server http://HOST:8188 --frame s1_first.png --good-ref
+  first_frame.png --bad-ref identity.png --lib-image Subjects/j/identity.png --lib-video
+  VideoRef/seg1.mp4` — 16 checks against a running ComfyUI: correct reference passes (31.6 dB on
+  the recorded segment-1 frame vs its slot-9 image) and the gate writes the chain frame; a wrong
+  reference (identity photo, 14.0 dB) fails, the gate writes `_REJECTED.png`, leaves the good
+  frame byte-identical, and the two filler prompts queued behind it are dropped; the library →
+  builder → References Manager path resolves image_1 / image_2 / video_1 from the copied files.
+- Both were run 2026-09-07 on a CPU ComfyUI (master, frontend from the package) with the RefPack,
+  rgthree, KJNodes, VHS and ComfyMath installed; the frontend loads `chain_check.json` with no
+  missing types, the library node filters / thumbnails / refreshes / mirrors, and the check and
+  gate nodes show PASS (green) / FAIL (red) with the strip in the node body. The full R2V graph
+  itself (sampling + AddGuide) was not re-run there — no GPU — so re-run `tools/live_check.py`
+  and the example on the next rented box.
 
 ## Chained segments on the canvas (the sequence pattern)
 

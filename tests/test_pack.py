@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for mmx-comfy-nodes without ComfyUI: `folder_paths`, `nodes` and `server` are
 stubbed; the NAS mirror is exercised through a fake ssh (MMX_NAS_PROXY=none + a PATH shim) that
-stores the remote file in a temp dir.
+stores the remote file in a temp dir. The check / gate / library / references nodes need torch +
+PIL (+ ffmpeg for the video case) and are skipped without them.
 
     python3 tests/test_pack.py
 """
@@ -19,6 +20,7 @@ LORAS = ["H3_Motion_BoosterV2.safetensors", "MiniMax-H3-Ref2VA-Acc-8Step.safeten
 fp = types.ModuleType("folder_paths")
 fp.get_filename_list = lambda kind: list(LORAS) if kind == "loras" else []
 fp.get_input_directory = lambda: os.path.join(TMP, "input")
+fp.get_temp_directory = lambda: os.path.join(TMP, "temp")
 os.makedirs(fp.get_input_directory(), exist_ok=True)
 sys.modules["folder_paths"] = fp
 nd = types.ModuleType("nodes")
@@ -51,6 +53,10 @@ os.environ["MMX_NAS_PROXY"] = "none"
 os.environ["MMX_NAS_KEY"] = os.path.abspath(__file__)          # any existing file = "configured"
 os.environ["MMX_PRESETS"] = os.path.join(TMP, "presets.json")
 os.environ["MMX_NAS_SHARE"] = "/volume1/subgenula"
+os.environ["MMX_LIBRARY"] = os.path.join(TMP, "library")
+os.environ["MMX_LIBRARY_THUMBS"] = os.path.join(TMP, "library_thumbs")
+os.environ["MMX_LIBRARY_SYNC"] = os.path.join(TMP, "fake_sync.sh")
+os.environ["MMX_LIBRARY_SYNC_LOG"] = os.path.join(TMP, "sync.log")
 
 sys.path.insert(0, os.path.dirname(ROOT))
 pack = importlib.import_module(os.path.basename(ROOT).replace("-", "_")) if False else None
@@ -160,6 +166,90 @@ def main():
         check("IS_CHANGED tracks the file", nodes.MMXLoadChainFrame.IS_CHANGED(fb, "chain_test", False) != s1)
     except ImportError as e:
         print(f"skip chain helper checks (no torch/PIL here: {e})")
+
+    # references builder (pure python)
+    refs = importlib.import_module("mmx_presets.references")
+    rj, pmap, lst = refs.build(["a.png", "", "", "", "", "", "", "", "z.png"], ["v.mp4", "", ""], ["s.wav"], True)
+    d = json.loads(rj)
+    check("references_json in the RefPack schema, compacted in slot order",
+          d == {"references": [{"kind": "image", "file": "a.png"}, {"kind": "image", "file": "z.png"}, {"kind": "video", "file": "v.mp4", "use_soundtrack": True}, {"kind": "audio", "file": "s.wav"}]}, rj)
+    check("picture_map: slot 9 -> <Picture 2>, soundtrack <Audio 1> before <Video 1>, standalone audio <Audio 2>",
+          "slot 1 -> <Picture 1>" in pmap and "slot 9 -> <Picture 2>" in pmap and "video 1 -> <Video 1> (+ soundtrack <Audio 1>)" in pmap and "audio 1 -> <Audio 2>" in pmap, pmap)
+    rj2, pmap2, _ = refs.build(["a.png"], ["v.mp4"], [""], False)
+    check("use_soundtrack off: video keeps the flag false, no <Audio>", json.loads(rj2)["references"][1]["use_soundtrack"] is False and "<Audio" not in pmap2, pmap2)
+    out = refs.MMXReferencesBuilder().run(image_1="a.png", image_9="z.png")
+    check("MMXReferencesBuilder node: empty slots ignored, missing files reported in the ui text", json.loads(out["result"][0])["references"][1]["file"] == "z.png" and "NOT in ComfyUI/input" in out["ui"]["text"][0], str(out))
+    try:
+        from minimax_refpack import refs as rp_refs   # the real RefPack when it is importable: tags must agree
+        tags = [t.tag for t in rp_refs.ReferenceSet.from_json(rj).assign_tags()]
+        check("RefPack assigns the same tags the picture_map claims", tags == ["<Picture 1>", "<Picture 2>", "<Video 1>", "<Audio 2>"], str(tags))
+    except ImportError:
+        pass
+
+    # first-frame check + gate + library (torch / PIL / ffmpeg)
+    try:
+        import numpy as np, torch
+        from PIL import Image
+        chk = importlib.import_module("mmx_presets.check")
+        lib = importlib.import_module("mmx_presets.library")
+        # geometry: a 4:3 reference into a 16:9 frame is centre-cropped (width) then resized like AddGuide
+        ref = torch.zeros((1, 300, 400, 3)); ref[:, :, :200, :] = 1.0        # left half white
+        g = chk.guide_geometry(ref, 320, 180)
+        check("guide_geometry cover-crops to the frame aspect and resizes (left half stays white, no letterbox)",
+              tuple(g.shape) == (1, 180, 320, 3) and float(g[0, 90, 40, 0]) > 0.99 and float(g[0, 90, 280, 0]) < 0.01 and float(g[0, 2, 40, 0]) > 0.99, str(g.shape))
+        check("cover_crop_box reports the kept region", chk.cover_crop_box(400, 300, 320, 180) == (0, 38, 400, 224) and chk.cover_crop_box(768, 816, 768, 448) == (0, 184, 768, 448))
+        a = torch.rand((1, 64, 96, 3)); noise = a + torch.randn_like(a) * 0.02
+        check("psnr: identical = 100 cap, tiny noise ~34 dB, ssim ordering", chk.psnr(a[0], a[0]) == 100.0 and 30 < chk.psnr(a[0], noise.clamp(0, 1)[0]) < 40 and chk.ssim(a[0], a[0]) > 0.999 and chk.ssim(a[0], noise.clamp(0, 1)[0]) < chk.ssim(a[0], a[0]))
+        node = chk.MMXFirstFrameCheck()
+        frames = torch.cat([a, a * 0.5])
+        r_ok = node.run(frames, a, 24.0)
+        r_bad = node.run(frames, torch.rand((1, 64, 96, 3)), 24.0)
+        # the same image comes back > 50 dB, not 100: the guide geometry re-samples through 8-bit lanczos like AddGuide
+        check("FirstFrameCheck: same image passes (> 50 dB, passed True), random fails; strip is reference|frame|diff wide",
+              r_ok["result"][2] is True and r_ok["result"][0] > 50 and r_bad["result"][2] is False and r_bad["result"][0] < 24 and tuple(r_ok["result"][3].shape) == (1, 64, 96 * 3 + 12, 3), f"{r_ok['result'][:3]} {r_bad['result'][:3]}")
+        check("FirstFrameCheck ui: text PASS/FAIL + preview image in temp", r_ok["ui"]["text"][0].startswith("PASS") and r_bad["ui"]["text"][0].startswith("FAIL") and r_ok["ui"]["passed"] == [True] and os.path.isfile(os.path.join(fp.get_temp_directory(), r_ok["ui"]["images"][0]["filename"])))
+        gate = chk.MMXChainGate()
+        good, rejected = chk.gate_paths("gate_test")
+        r = gate.run(frames, True, "gate_test")
+        check("ChainGate pass: writes the LAST frame under input/<name>.png", r["result"] == (good, True) and os.path.isfile(good) and abs(Image.open(good).getpixel((0, 0))[0] - int(frames[-1, 0, 0, 0] * 255)) <= 1 and good in r["ui"]["text"][0])
+        before = open(good, "rb").read()
+        try:
+            gate.run(frames * 0.1, False, "gate_test"); check("ChainGate fail raises", False)
+        except RuntimeError as e:
+            check("ChainGate fail: raises naming the REJECTED file, writes it, keeps the good frame byte-identical",
+                  rejected in str(e) and "kept" in str(e) and os.path.isfile(rejected) and open(good, "rb").read() == before, str(e))
+        # library: image + video (ffmpeg) -> input copy, first frame, thumbs, refresh, sync trigger
+        L = lib.root(); os.makedirs(os.path.join(L, "Subjects", "j"), exist_ok=True); os.makedirs(os.path.join(L, "VideoRef"), exist_ok=True)
+        Image.fromarray((np.stack([np.full((48, 64), 255), np.zeros((48, 64)), np.zeros((48, 64))], -1)).astype(np.uint8)).save(os.path.join(L, "Subjects", "j", "red.png"))
+        open(os.path.join(L, "Subjects", "j", "notes.txt"), "w").write("ignored")
+        items = lib.scan(force=True)
+        check("library scan lists images/videos only, folder-aware paths", [i["path"] for i in items] == ["Subjects/j/red.png"] and items[0]["kind"] == "image", str(items))
+        ln = lib.MMXLibraryImage()
+        check("VALIDATE_INPUTS accepts existing, rejects unknown / traversal", ln.VALIDATE_INPUTS("Subjects/j/red.png") is True and ln.VALIDATE_INPUTS("Subjects/j/nope.png") is not True and ln.VALIDATE_INPUTS("../etc/passwd") is not True)
+        out = ln.run("Subjects/j/red.png")
+        img, name, path = out["result"]
+        check("MMXLibraryImage: image tensor, flat input filename, library path; file copied into input/",
+              tuple(img.shape) == (1, 48, 64, 3) and float(img[0, 0, 0, 0]) > 0.99 and name == "Subjects__j__red.png" and os.path.isfile(os.path.join(fp.get_input_directory(), name)) and path == os.path.join(L, "Subjects/j/red.png"), str(out["result"][1:]))
+        check("thumb jpeg", lib.thumb_jpeg("Subjects/j/red.png", 32)[:2] == b"\xff\xd8")
+        if shutil.which("ffmpeg"):
+            vp = os.path.join(L, "VideoRef", "blue.mp4")
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x48:d=0.5:r=24", "-pix_fmt", "yuv420p", vp], check=True)
+            lib.scan(force=True)
+            out = ln.run("VideoRef/blue.mp4")
+            img, name, path = out["result"]
+            check("MMXLibraryImage mp4: first frame as IMAGE (blue), the mp4 itself copied into input/",
+                  tuple(img.shape) == (1, 48, 64, 3) and float(img[0, 24, 32, 2]) > 0.8 and float(img[0, 24, 32, 0]) < 0.2 and name == "VideoRef__blue.mp4" and os.path.isfile(os.path.join(fp.get_input_directory(), name)) and "first frame" in out["ui"]["text"][0], str(out))
+            check("video thumb jpeg", lib.thumb_jpeg("VideoRef/blue.mp4", 32)[:2] == b"\xff\xd8")
+        else:
+            print("skip mp4 library checks (no ffmpeg)")
+        # sync trigger: script absent -> clean error; present -> runs detached and the log fills
+        st = lib.start_sync()
+        check("Mirror from NAS without the script: reported, not raised", st.get("error") and "not present" in st["error"], str(st))
+        open(os.environ["MMX_LIBRARY_SYNC"], "w").write(f"#!/usr/bin/env bash\necho '[library-sync] done: 1 files' >> {os.environ['MMX_LIBRARY_SYNC_LOG']}\n")
+        st = lib.start_sync(); time.sleep(0.6); st2 = lib.sync_status()
+        check("Mirror from NAS with the script: started, finished rc 0, log tail visible", st["started_now"] and not st2["running"] and st2["last"]["rc"] == 0 and "done: 1 files" in st2["log_tail"], str(st2))
+    except ImportError as e:
+        print(f"skip check/gate/library checks (no torch/PIL here: {e})")
 
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} passed")
