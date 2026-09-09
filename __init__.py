@@ -10,8 +10,9 @@ from .mmx_presets import store as _store
 from .mmx_presets.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 from .mmx_presets import check as _check, library as _library, references as _references
 from .mmx_presets import lora_stack as _lora_stack, deck as _deck, manager as _manager, phrases as _phrases
+from .mmx_presets import affix as _affix, registry as _registry
 
-for _m in (_check, _library, _references, _lora_stack, _deck, _manager):
+for _m in (_check, _library, _references, _lora_stack, _deck, _manager, _affix):
     NODE_CLASS_MAPPINGS.update(_m.NODE_CLASS_MAPPINGS)
     NODE_DISPLAY_NAME_MAPPINGS.update(_m.NODE_DISPLAY_NAME_MAPPINGS)
 
@@ -31,6 +32,8 @@ _st = _store.get_store()
 _st.load()
 _ph = _phrases.get_store()
 _ph.load()
+_reg = _registry.get_store()
+_reg.load()
 if _manager._BASE is None:
     print(f"[mmx-presets] MMX References Manager not registered: {_manager._REASON}")
 print(f"[mmx-presets] library root {_library.root()} ({len(_library.scan())} file(s))")
@@ -40,11 +43,20 @@ print(f"[mmx-presets] store {_st.path}: {len(_st.data['presets'])} preset(s) loc
 
 
 def _initial_pull():
-    for name, store in (("presets", _st), ("phrases", _ph)):
+    for name, store in (("presets", _st), ("phrases", _ph), ("loras registry", _reg)):
         try:
             print(f"[mmx-presets] initial NAS pull ({name}): {store.pull()}")
         except Exception as e:
             print(f"[mmx-presets] initial NAS pull ({name}) failed: {e}")
+    # after the pull, so an entry edited on another box is never shadowed by a fresh pre-fill
+    try:
+        from .mmx_presets import lora_stack as _ls
+        n = _reg.prefill(_ls.lora_names(refresh=True)[1:])
+        print(f"[mmx-presets] LoRA registry: {len(_reg.all())} entr{'y' if len(_reg.all()) == 1 else 'ies'}, {n} pre-filled from safetensors metadata")
+        if n:
+            _reg.push_async()
+    except Exception as e:
+        print(f"[mmx-presets] LoRA registry pre-fill failed: {e}")
 
 
 # ComfyUI imports custom nodes before the server listens; the pull can take seconds, so it

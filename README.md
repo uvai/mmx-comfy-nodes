@@ -106,6 +106,34 @@ that entry (later ones move up); `⇢ Inject all (group)` injects every Library 
 canvas group (or all of them when the node is in no group) in slot order and reports each. The
 Manager used is the one remembered by the Deck's target dropdown (else the first in the graph).
 
+**LoRA registry + automatic triggers** (0.4). `/workspace/mmx/loras.json` (env
+`MMX_LORAS_REGISTRY`), mirrored to `/volume1/subgenula/mmx/loras.json` with the preset rules
+(union by filename, newer wins, tombstones). One entry per LoRA file:
+`{triggers: [...], phrases: [...], default_strength, notes, auto}`. Files without an entry are
+pre-filled at load (after the NAS pull) and on `POST /mmx/registry/refresh` from the safetensors
+header — `modelspec.trigger_phrase`, else the `ss_tag_frequency` tags present in ≥ 90 % of the
+training images (max 5) — as `auto: true, updated: 0`, so an edit on any box or the NAS copy
+always wins and a deleted entry is never re-added. Presets keep storing only (name, strength,
+on); triggers come from the registry, so they stay consistent across presets.
+
+- **MMX LoRA Stack** gains STRING outputs `triggers` (the enabled rows' trigger words, row
+  order, case-insensitive dedupe, joined by `, `) and `phrases` (their phrases, same rule); the
+  body lists them under each row and ends with `→ triggers out: …`. It re-executes when the
+  registry file changes.
+- **MMX Prompt Affix** (`deck.json` #403) sits between the Manager's `prompt` (185:18) and its
+  consumers (R2V #184 `prompt`, Display #186): inputs `prompt`, `prefix`, `suffix`, `mode`
+  (prepend | append, default prepend) and `auto_triggers` wired from the Stack's `triggers`.
+  Output `[prefix\n] triggers, prompt [\nsuffix]` (append: `prompt, triggers`); the body shows the
+  final text. No enabled row with triggers → the prompt passes through unchanged.
+- **Deck**: each LoRA row shows its triggers (`auto` marked) and has a ✎ that opens the registry
+  editor (triggers, phrases, default strength, notes, "from metadata" re-reads the file) writing
+  through `/mmx/registry/set`; picking a LoRA in a row switches it on and takes the registry's
+  default strength while the strength is still at 1. Under the rows: "trigger prefix for the
+  enabled rows: …", and the Send report repeats the prefix that the Affix will apply.
+
+Routes: `GET /mmx/registry`, `POST /mmx/registry/refresh|set|delete`, `GET /mmx/registry/metadata?name=`,
+`POST /mmx/registry/for_rows`.
+
 **MMX References Manager** — a drop-in for `MiniMaxH3ReferencePack` (node 185): identical inputs
 and all 20 outputs, the RefPack's own widget (our extension hands the RefPack's
 `beforeRegisterNodeDef` a nodeData wearing its name). The RefPack keeps its reference list in
@@ -140,7 +168,8 @@ RefPack found, Manager registered, store paths).
 | **MMX Preset** | model, clip, preset (dropdown from the store), strength_scale | model + clip with the preset's LoRAs applied in order (core `LoraLoader`, strength × scale on model and clip), prompt STRING, preset_name STRING |
 | **MMX Preset Save** | name, prompt STRING (type or connect), overwrite, notes, up to 5 × (lora dropdown, strength) | preset_name; OUTPUT_NODE — runs every time it is queued, writes the store and pushes to the NAS |
 | **MMX Deck** | prompt, preset, loras_json, targets_json (hidden; the panel edits them) | prompt STRING, loras_json STRING — executing it is a passthrough; Send / Save are buttons |
-| **MMX LoRA Stack** | model, clip, 5 × (on, lora, strength 0–2) | model, clip, stack STRING (the effective rows) |
+| **MMX LoRA Stack** | model, clip, 5 × (on, lora, strength 0–2) | model, clip, stack STRING (the effective rows), triggers STRING, phrases STRING (registry words of the enabled rows) |
+| **MMX Prompt Affix** | prompt (link), prefix, suffix, mode (prepend/append), auto_triggers (wire the Stack's triggers) | prompt STRING with the triggers prepended/appended; final text shown in the node |
 | **MMX References Manager** | = MiniMaxH3ReferencePack | = MiniMaxH3ReferencePack (20 outputs) + key fallback + re-render on external write |
 | **MMX Sequence** | model, clip, index INT, strength_scale, preset_1..preset_8 | model, clip, prompt, preset_name, slot, count — empty slots skipped, index wraps over the filled ones |
 | **MMX Save Frame (fixed name)** | image, filename | writes the LAST image of the batch as `input/<filename>.png`, overwriting (OUTPUT_NODE) |
@@ -237,7 +266,7 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   presets, delete tombstones surviving a NAS pull, the phrase store (seed, add / delete / bulk
   replace, mirror round trip, re-seed after a local loss keeping deletions), the LoRA Stack,
   the Deck passthrough, the Manager subclass + key fallback, the check's skip path and inject.
-- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR]` — 42 frontend checks
+- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR]` — 51 frontend checks
   (playwright chromium) on `examples/deck.json`: no missing types; the stack took over #137's
   links with the turbo LoRA untouched; tag buttons follow the Manager's slots; Inject / Clear
   slot / Inject all land in the Manager's slot UI (tiles) and are reported honestly; Send lands
@@ -246,7 +275,11 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   direction / references_json / rows; preset Save / Load / Update / Delete round-trip with the
   on flags; phrase chip insert (ellipsis rule), add, delete; the MMX References Manager drop-in
   re-renders on a plain widget write; the check skips cleanly with no reference and when
-  disabled, and still PASSes with one; ↻ Refresh; no extension errors.
+  disabled, and still PASSes with one; ↻ Refresh; no extension errors. 0.4 adds: the Affix is
+  wired Manager → Affix → R2V/Display with the Stack's `triggers` in the API JSON; editing a row's
+  triggers from the Deck lands in the registry, the Stack body and the Send report; disabling the
+  row drops them; a registry refresh keeps the user entry; executing the Affix prepends /
+  appends / passes through.
 - 2026-09-09: both run green on a CPU ComfyUI 0.34 / frontend 1.51.9 with the RefPack, rgthree,
   KJNodes, VHS and ComfyMath installed (no H3 weights, so the model loaders show the frontend's
   "6 errors" — environmental). Not run on a GPU box: the LoRA Stack actually loading a LoRA
@@ -322,7 +355,7 @@ lists the store. Batch runs from the studio and canvas runs therefore share one 
 ## Tests
 
 ```
-python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (76 checks; torch /
+python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (90 checks; torch /
                                # PIL / ffmpeg / RefPack dependent ones are skipped without them)
-python3 tools/ui_check_deck.py --server http://127.0.0.1:8188   # 42 playwright checks on deck.json
+python3 tools/ui_check_deck.py --server http://127.0.0.1:8188   # 51 playwright checks on deck.json
 ```

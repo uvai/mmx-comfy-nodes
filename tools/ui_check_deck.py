@@ -66,7 +66,15 @@ def main():
                     chk: chk && {inputs: chk.inputs.map(i => [i.name, i.link, i.shape]), widgets: chk.widgets.map(w => [w.name, w.value])}};
         }""")
         print("   loaded:", json.dumps(info)[:1200])
-        check("deck.json loads with no missing node types (32 nodes)", info["count"] == 32 and not info["missing"], str(info["missing"]))
+        check("deck.json loads with no missing node types (33 nodes)", info["count"] == 33 and not info["missing"], str(info["missing"]))
+        aff = pg.evaluate("""() => { const a = app.graph.getNodeById(403), s = app.graph.getNodeById(137), m = app.graph.getNodeById(185), d = app.graph.getNodeById(186), r = app.graph.getNodeById(184);
+            const L = id => app.graph.links.get ? app.graph.links.get(id) : app.graph.links[id];
+            const src = (n, name) => { const i = n.inputs.find(x => x.name === name); const l = i && i.link != null && L(i.link); return l ? [Number(l.origin_id), Number(l.origin_slot)] : null; };
+            return {stackOutputs: s.outputs.map(o => o.name), affixPrompt: src(a, 'prompt'), affixTrig: src(a, 'auto_triggers'), dispSrc: src(d, 'source'), r2vPrompt: src(r, 'prompt'),
+                    widgets: a.widgets.map(w => [w.name, w.value]), mgrPromptLinks: m.outputs[18].links.length}; }""")
+        check("Stack has triggers/phrases outputs; Affix #403 wired: Manager prompt -> Affix -> Display + R2V prompt; Stack triggers -> auto_triggers",
+              aff["stackOutputs"] == ["model", "clip", "stack", "triggers", "phrases"] and aff["affixPrompt"] == [185, 18] and aff["affixTrig"] == [137, 3] and aff["dispSrc"] == [403, 0] and aff["r2vPrompt"] == [403, 0] and aff["mgrPromptLinks"] == 1
+              and dict(aff["widgets"]).get("mode") == "prepend", str(aff))
         st = info["stack"]
         check("MMX LoRA Stack #137 replaced the Power Lora Loader: model+clip links kept, MODEL out -> turbo LoRA #158 (untouched)",
               st and st["type"] == "MMXLoRAStack" and dict(st["inputs"])["model"] == 278 and dict(st["inputs"])["clip"] == 258 and st["out0"] == [334]
@@ -122,7 +130,7 @@ def main():
             ui.editor.value = ''; ui.editor.focus(); ui.tagButtons['<Picture 1>'].click(); ui.editor.value = prompt; ui.editor.dispatchEvent(new Event('input'));
             ui.rows[0].sel.value = 'MiniMax-H3-Ref2VA-Acc-8Step.safetensors'; ui.rows[0].str.value = '0.5'; ui.rows[0].on.checked = true; ui.rows[0].sel.dispatchEvent(new Event('change'));
             ui.rows[1].sel.value = 'side_fuck_h3_000000750.safetensors'; ui.rows[1].str.value = '1.25'; ui.rows[1].on.checked = true; ui.rows[1].sel.dispatchEvent(new Event('change'));
-            ui.rows[2].sel.value = 'H3_Motion_BoosterV2.safetensors'; ui.rows[2].str.value = '0.8'; ui.rows[2].on.checked = false; ui.rows[2].sel.dispatchEvent(new Event('change'));
+            ui.rows[2].sel.value = 'H3_Motion_BoosterV2.safetensors'; ui.rows[2].sel.dispatchEvent(new Event('change')); ui.rows[2].str.value = '0.8'; ui.rows[2].str.dispatchEvent(new Event('change')); ui.rows[2].on.checked = false; ui.rows[2].on.dispatchEvent(new Event('change'));
             const before = app.graph.getNodeById(185).widgets.find(w => w.name === 'direction').value;
             ui.btnSend.click();
             const mgr = app.graph.getNodeById(185), stk = app.graph.getNodeById(137);
@@ -144,6 +152,9 @@ def main():
         check("API JSON: Manager direction + references_json match what Send/Inject wrote (2 pictures + the video)", o185.get("direction") == prompt and [x["file"] for x in refs_api if x["kind"] == "image"] == [flat_a, flat_b] and [x["file"] for x in refs_api if x["kind"] == "video"] == [a.lib_video.replace("/", "__")], json.dumps(o185)[:300])
         check("API JSON: Stack rows match", o137.get("class_type") is None and o137.get("lora_1") == "MiniMax-H3-Ref2VA-Acc-8Step.safetensors" and o137.get("strength_1") == 0.5 and o137.get("on_1") is True and o137.get("on_3") is False and api_json["137"]["class_type"] == "MMXLoRAStack", json.dumps(api_json.get("137"))[:300])
         check("API JSON: turbo LoRA #158 takes the stack's model, Deck not in the prompt path", api_json["158"]["inputs"]["model"] == ["137", 0] and api_json["400"]["class_type"] == "MMXDeck")
+        a403 = api_json["403"]["inputs"]
+        check("API JSON: Affix takes the Manager prompt + the Stack's triggers output; R2V prompt and Display read the Affix", a403["prompt"] == ["185", 18] and a403["auto_triggers"] == ["137", 3] and a403["mode"] == "prepend"
+              and api_json["184"]["inputs"]["prompt"] == ["403", 0] and api_json["186"]["inputs"]["source"] == ["403", 0], json.dumps(a403))
         # workflow JSON round trip
         ser = pg.evaluate("() => app.graph.serialize()")
         n185 = next(n for n in ser["nodes"] if n["id"] == 185); n137 = next(n for n in ser["nodes"] if n["id"] == 137); n400 = next(n for n in ser["nodes"] if n["id"] == 400)
@@ -156,6 +167,27 @@ def main():
                 stack1: app.graph.getNodeById(137).widgets.find(w => w.name === 'lora_1').value}; }""")
         check("Pull from graph reads the Manager's direction back into the editor", r["pulled"] == "edited on the manager" and r["editor"] == "edited on the manager", str(r))
         check("Undo restores the pre-Send direction (textarea too) and the Stack rows", r["direction"] == "<Subject 1> hugs <Subject 2>" and r["textarea"] == "<Subject 1> hugs <Subject 2>" and r["stack1"] == "H3_Motion_BoosterV2.safetensors", str(r))
+
+        # 4b. registry: edit a row's triggers from the Deck, see them in the Stack body and the Send report; disabling removes them
+        r = pg.evaluate("""async () => { const d = app.graph.getNodeById(400), ui = d._mmxDeck;
+            d.mmxDeck.editRegistry(0); const box = ui.regEditor; const inputs = box.querySelectorAll('input');
+            inputs[0].value = 'accel8, turbo mode'; inputs[1].value = 'fast pan'; inputs[2].value = '0.5';
+            box.querySelector('button.primary').click(); await new Promise(r => setTimeout(r, 1200));
+            const reg = await (await fetch('/mmx/registry')).json();
+            ui.btnSend.click();
+            const stk = app.graph.getNodeById(137);
+            return {entry: reg.loras['MiniMax-H3-Ref2VA-Acc-8Step.safetensors'], boxHidden: box.hidden, trigLine: ui.rows[0].trig.textContent, prefixLine: ui.prefixLine.textContent,
+                    report: ui.report.innerText, stackBody: stk.widgets.find(w => w.name === 'mmx_result').value}; }""")
+        print("   registry:", json.dumps(r)[:600])
+        check("Deck ✎ writes the registry (triggers, phrases, strength) through /mmx/registry/set", r["entry"] and r["entry"]["triggers"] == ["accel8", "turbo mode"] and r["entry"]["phrases"] == ["fast pan"] and r["entry"]["default_strength"] == 0.5 and r["entry"]["auto"] is False and r["boxHidden"], str(r["entry"]))
+        check("row shows its triggers; Send report shows the trigger prefix; Stack body lists triggers under the row", r["trigLine"] == "accel8, turbo mode" and "trigger prefix that will be applied" in r["report"] and "accel8, turbo mode" in r["report"]
+              and "triggers: accel8, turbo mode" in r["stackBody"] and "→ triggers out: accel8, turbo mode" in r["stackBody"], r["report"] + r["stackBody"])
+        r = pg.evaluate("""() => { const d = app.graph.getNodeById(400), ui = d._mmxDeck; ui.rows[0].on.checked = false; ui.rows[0].on.dispatchEvent(new Event('change')); ui.btnSend.click();
+            return {report: ui.report.innerText, prefixLine: ui.prefixLine.textContent, stackBody: app.graph.getNodeById(137).widgets.find(w => w.name === 'mmx_result').value, on1: app.graph.getNodeById(137).widgets.find(w => w.name === 'on_1').value}; }""")
+        check("disabling the row removes its triggers from the prefix (report + Stack body)", "accel8" not in r["report"] and "(none" in r["prefixLine"] and "accel8" not in r["stackBody"] and r["on1"] is False, r["report"])
+        pg.evaluate("""() => { const d = app.graph.getNodeById(400), ui = d._mmxDeck; ui.rows[0].on.checked = true; ui.rows[0].on.dispatchEvent(new Event('change')); ui.btnSend.click(); }""")
+        registry_after = pg.evaluate("async () => (await (await fetch('/mmx/registry/refresh', {method: 'POST'})).json()).loras['MiniMax-H3-Ref2VA-Acc-8Step.safetensors']")
+        check("registry refresh (pull + pre-fill) keeps the user entry", registry_after and registry_after["triggers"] == ["accel8", "turbo mode"] and registry_after["auto"] is False, str(registry_after))
 
         # 5. presets round trip (save -> reload page state -> load -> update -> delete)
         r = pg.evaluate("""async (prompt) => { const d = app.graph.getNodeById(400), ui = d._mmxDeck;
@@ -230,6 +262,28 @@ def main():
         check("enabled=false with a reference: skipped too (check disabled)", r["status"] == "success" and "check disabled" in (r["text"] or "") and r["out"]["passed"] == [True], str(r))
         r = run_check(True, True)
         check("enabled with the same image as reference: real comparison, PASS", r["status"] == "success" and (r["text"] or "").startswith("PASS") and r["out"]["passed"] == [True] and r["out"]["psnr"][0] > 30, str(r))
+
+        # 8b. Prompt Affix executes: triggers prepended, mode append, none
+        def run_affix(trig, mode):
+            return pg.evaluate("""async ([trig, mode]) => {
+                app.graph.clear();
+                const mk = (t, x, y) => { const n = LiteGraph.createNode(t); n.pos = [x, y]; app.graph.add(n); return n; };
+                const p = mk('PrimitiveString', 50, 50), t = mk('PrimitiveString', 50, 200), a = mk('MMXPromptAffix', 500, 50), s = mk('PreviewAny', 900, 50);
+                p.widgets[0].value = '<Subject 1> walks in.'; t.widgets[0].value = trig;
+                p.connect(0, a, 0); t.connect(0, a, a.inputs.findIndex(i => i.name === 'auto_triggers')); a.connect(0, s, 0);
+                a.widgets.find(w => w.name === 'mode').value = mode;
+                await app.queuePrompt(0);
+                for (let i = 0; i < 60; i++) { await new Promise(r => setTimeout(r, 1000)); const q = await (await fetch('/queue')).json(); if (!q.queue_running.length && !q.queue_pending.length) break; }
+                await new Promise(r => setTimeout(r, 1000));
+                const h = await (await fetch('/history')).json(); const last = Object.values(h).slice(-1)[0];
+                return {status: last && last.status && last.status.status_str, text: (last && last.outputs && last.outputs[String(a.id)] || {}).text, body: a.widgets.find(w => w.name === 'mmx_result')?.value};
+            }""", [trig, mode])
+        r = run_affix("accel8, turbo mode", "prepend")
+        check("Affix run (prepend): final prompt = triggers, prompt; shown in the node body", r["status"] == "success" and r["text"][0].endswith("accel8, turbo mode, <Subject 1> walks in.") and (r["body"] or "").startswith("triggers (prepend): accel8, turbo mode"), str(r))
+        r = run_affix("accel8", "append")
+        check("Affix run (append)", r["status"] == "success" and r["text"][0].endswith("<Subject 1> walks in., accel8"), str(r))
+        r = run_affix("", "prepend")
+        check("Affix run with no triggers: prompt unchanged", r["status"] == "success" and r["text"][0].endswith("\n<Subject 1> walks in.") and "no triggers" in r["text"][0], str(r))
 
         # 9. phrases / presets survive a Refresh (pull) from the panel
         pg.evaluate("wf => app.loadGraphData(wf)", wf); time.sleep(3)

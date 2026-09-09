@@ -8,7 +8,7 @@ import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 import * as M from "./mmx_api.js";
 
-const RESULT_NODES = ["MMXFirstFrameCheck", "MMXChainGate", "MMXLibraryImage", "MMXReferencesBuilder", "MMXSaveFrame", "MMXLoRAStack"];
+const RESULT_NODES = ["MMXFirstFrameCheck", "MMXChainGate", "MMXLibraryImage", "MMXReferencesBuilder", "MMXSaveFrame", "MMXLoRAStack", "MMXPromptAffix"];
 const LIB_NONE = "(library empty — press Refresh / Mirror from NAS)";
 const COLORS = { pass: { color: "#1f4d2b", bgcolor: "#27603a" }, fail: { color: "#5a1f1f", bgcolor: "#7a2a2a" } };
 let lib = { paths: [], items: {}, root: "", loaded: false, lastLine: "" };
@@ -58,8 +58,10 @@ function setupStackNode(node) {
   btn.serialize = false; btn.options = { ...(btn.options || {}), serialize: false };
   const origConfigure = node.onConfigure;
   node.onConfigure = function (...a) { const r = origConfigure?.apply(this, a); summary(); return r; };
-  summary();
-  node.setSize([Math.max(node.size[0], 460), node.computeSize()[1]]);
+  const onReg = () => { if (node.graph) summary(); else window.removeEventListener("mmx-registry-changed", onReg); };
+  window.addEventListener("mmx-registry-changed", onReg);
+  if (M.registry.loaded) summary(); else M.loadRegistry(false).then(summary).catch(summary);
+  node.setSize([Math.max(node.size[0], 460), node.computeSize()[1] + 60]);
 }
 
 // ── library inject ───────────────────────────────────────────────────────────
@@ -218,6 +220,7 @@ app.registerExtension({
       if (node) showResult(node, d.text, false);
     });
     try { await fetchLibrary(false); } catch (e) { console.warn("[mmx-nodes] library fetch failed", e); }
+    try { await M.loadRegistry(false); } catch (e) { console.warn("[mmx-nodes] registry fetch failed", e); }
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (!RESULT_NODES.includes(nodeData.name)) return;

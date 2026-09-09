@@ -6,7 +6,7 @@
 import { app } from "../../scripts/app.js";
 import * as M from "./mmx_api.js";
 
-const PANEL_W = 820, PANEL_H = 760;
+const PANEL_W = 820, PANEL_H = 900;
 const TAG_GROUPS = [["Picture", 9], ["Subject", 3], ["Video", 3], ["Audio", 1]];
 const cache = { names: [], presets: {}, loras: [], groups: [], loaded: false };
 
@@ -28,7 +28,8 @@ async function loadPhrases(refresh) {
   return d;
 }
 async function loadAll(refresh) {
-  await Promise.all([loadPresets(refresh).catch(e => console.warn("[mmx-deck] presets", e)), loadLoras(refresh).catch(() => {}), loadPhrases(refresh).catch(e => console.warn("[mmx-deck] phrases", e))]);
+  await Promise.all([loadPresets(refresh).catch(e => console.warn("[mmx-deck] presets", e)), loadLoras(refresh).catch(() => {}), loadPhrases(refresh).catch(e => console.warn("[mmx-deck] phrases", e)),
+                     M.loadRegistry(refresh).catch(e => console.warn("[mmx-deck] registry", e))]);
   cache.loaded = true;
 }
 
@@ -64,7 +65,7 @@ function hideWidget(w) {
 const CSS = `
 .mmx-deck{display:flex;flex-direction:column;gap:6px;font:12px/1.35 system-ui,sans-serif;color:#ddd;box-sizing:border-box;height:100%;overflow:auto;padding:2px}
 .mmx-deck *{box-sizing:border-box}
-.mmx-deck .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.mmx-deck .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex:0 0 auto}
 .mmx-deck .lbl{color:#9a9a9a;min-width:52px;text-transform:uppercase;font-size:10px;letter-spacing:.06em}
 .mmx-deck select,.mmx-deck input[type=text],.mmx-deck input[type=number],.mmx-deck textarea{background:#1c1c1c;color:#eee;border:1px solid #444;border-radius:4px;padding:3px 6px;font:inherit}
 .mmx-deck input[type=number]{width:64px}
@@ -75,17 +76,22 @@ const CSS = `
 .mmx-deck button.tag.sub{border-color:#5f8a3f;background:#2a3d22}
 .mmx-deck button.primary{background:#2d5a2d;border-color:#4a8a4a;font-weight:600}
 .mmx-deck button.danger{border-color:#8a3a3a}
-.mmx-deck textarea.editor{width:100%;min-height:150px;resize:vertical;font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+.mmx-deck textarea.editor{width:100%;min-height:150px;resize:vertical;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;flex:0 0 auto}
 .mmx-deck .chips{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
 .mmx-deck .chip{background:#333;border:1px solid #555;border-radius:12px;padding:1px 9px;cursor:pointer;white-space:nowrap;max-width:420px;overflow:hidden;text-overflow:ellipsis}
 .mmx-deck .chip:hover{background:#444}
 .mmx-deck .chip .x{margin-left:6px;color:#e88;cursor:pointer}
 .mmx-deck .grp{color:#8fb0d8;font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-right:2px}
-.mmx-deck .phrases{display:flex;flex-direction:column;gap:3px;max-height:150px;overflow:auto;padding:4px;border:1px solid #333;border-radius:4px}
+.mmx-deck .phrases{display:flex;flex-direction:column;gap:3px;max-height:150px;overflow:auto;padding:4px;border:1px solid #333;border-radius:4px;flex:0 0 auto}
 .mmx-deck table.rows{border-collapse:collapse}
 .mmx-deck table.rows td{padding:1px 4px}
-.mmx-deck table.rows select{width:330px}
-.mmx-deck .report{white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:#161616;border:1px solid #333;border-radius:4px;padding:5px 7px;min-height:38px;max-height:120px;overflow:auto}
+.mmx-deck table.rows select{width:300px}
+.mmx-deck .trig{color:#9fc9ff;font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mmx-deck .trig .auto{color:#888;font-style:italic}
+.mmx-deck .regedit{background:#181818;border:1px solid #3f5f8a;border-radius:4px;padding:6px;display:flex;flex-direction:column;gap:4px;margin:2px 0 4px 60px}
+.mmx-deck .regedit input[type=text]{width:100%}
+.mmx-deck .regedit .hint{color:#999;font-size:11px}
+.mmx-deck .report{white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:#161616;border:1px solid #333;border-radius:4px;padding:5px 7px;min-height:56px;max-height:160px;overflow:auto;flex:0 0 auto}
 .mmx-deck .report a{color:#8fc1ff;cursor:pointer;text-decoration:underline}
 .mmx-deck .ok{color:#8fd98f}.mmx-deck .warn{color:#f0c060}.mmx-deck .err{color:#f08080}
 .mmx-deck hr{border:0;border-top:1px solid #333;margin:2px 0}
@@ -175,12 +181,26 @@ function buildPanel(node) {
     const on = el("input", { type: "checkbox", title: "on / off" });
     const sel = el("select");
     const str = el("input", { type: "number", min: "0", max: "2", step: "0.05" });
-    const sync = () => writeState(node, { rows: ui.rows.map(r => ({ name: r.sel.value, strength: parseFloat(r.str.value) || 0, on: r.on.checked })) });
-    on.addEventListener("change", sync); sel.addEventListener("change", sync); str.addEventListener("change", sync); str.addEventListener("input", sync);
-    ui.rows.push({ on, sel, str });
-    tbl.appendChild(el("tr", {}, el("td", { text: `LoRA ${i + 1}` }), el("td", {}, on), el("td", {}, sel), el("td", {}, str)));
+    const sync = () => { writeState(node, { rows: ui.rows.map(r => ({ name: r.sel.value, strength: parseFloat(r.str.value) || 0, on: r.on.checked })) }); renderTriggerLines(node); };
+    on.addEventListener("change", sync); str.addEventListener("change", sync); str.addEventListener("input", sync);
+    sel.addEventListener("change", () => {
+      // picking a LoRA switches the row on and takes the registry's default strength while the
+      // strength is still at the widget default (1); a value the user typed is kept
+      const e = M.registry.loras[sel.value];
+      if (e && e.default_strength != null && parseFloat(str.value) === 1) str.value = e.default_strength;
+      if (sel.value !== M.NONE) on.checked = true;
+      sync();
+    });
+    const trig = el("div", { class: "trig" });
+    const edit = el("button", { text: "✎", title: "edit this LoRA's trigger words / phrases in the registry", onclick: () => openRegistryEditor(node, i) });
+    ui.rows.push({ on, sel, str, trig, edit });
+    tbl.appendChild(el("tr", {}, el("td", { text: `LoRA ${i + 1}` }), el("td", {}, on), el("td", {}, sel), el("td", {}, str), el("td", {}, edit), el("td", {}, trig)));
   }
   root.appendChild(el("div", { class: "row", style: "align-items:flex-start" }, el("span", { class: "lbl", text: "loras" }), tbl));
+  ui.regEditor = el("div", { class: "regedit", hidden: "" });
+  root.appendChild(ui.regEditor);
+  ui.prefixLine = el("div", { class: "trig", style: "max-width:100%;white-space:normal" });
+  root.appendChild(ui.prefixLine);
 
   // targets + actions
   ui.mgrSel = el("select", { onchange: () => { const t = readState(node).targets; t.manager = Number(ui.mgrSel.value) || null; writeState(node, { targets: t }); M.remember("manager", t.manager); renderTags(node); } });
@@ -267,6 +287,52 @@ function renderRows(node) {
     if (r.sel._sig !== sig) { r.sel._sig = sig; r.sel.innerHTML = ""; for (const v of opts) r.sel.appendChild(el("option", { value: v, text: v === M.NONE ? v : v.replace(/\.safetensors$/, "") })); }
     r.sel.value = row.name; r.str.value = row.strength; r.on.checked = row.on;
   });
+  renderTriggerLines(node);
+}
+function renderTriggerLines(node) {
+  const ui = node._mmxDeck; if (!ui) return;
+  const st = readState(node);
+  ui.rows.forEach((r, i) => {
+    const row = st.rows[i]; const e = M.registry.loras[row.name];
+    r.edit.disabled = !row.name || row.name === M.NONE;
+    if (!e || row.name === M.NONE) { r.trig.textContent = ""; r.trig.title = ""; return; }
+    const t = e.triggers?.length ? e.triggers.join(", ") : "(no triggers)";
+    r.trig.innerHTML = ""; r.trig.appendChild(document.createTextNode(t));
+    if (e.auto) r.trig.appendChild(el("span", { class: "auto", text: " auto" }));
+    r.trig.title = `${row.name}\ntriggers: ${t}\nphrases: ${(e.phrases || []).join(", ") || "(none)"}${e.notes ? "\n" + e.notes : ""}`;
+  });
+  const info = M.triggersFor(st.rows);
+  ui.prefixLine.textContent = info.triggers.length ? `trigger prefix for the enabled rows: ${info.triggers.join(", ")}` : "trigger prefix for the enabled rows: (none)";
+}
+function openRegistryEditor(node, i) {
+  const ui = node._mmxDeck; const name = ui.rows[i].sel.value;
+  if (!name || name === M.NONE) return;
+  const e = M.registry.loras[name] || { triggers: [], phrases: [], default_strength: 0.85, notes: "" };
+  const box = ui.regEditor; box.innerHTML = ""; box.hidden = false;
+  const trig = el("input", { type: "text", value: (e.triggers || []).join(", "), placeholder: "trigger words, comma-separated" });
+  const phr = el("input", { type: "text", value: (e.phrases || []).join(", "), placeholder: "associated phrases, comma-separated" });
+  const str = el("input", { type: "number", min: "0", max: "2", step: "0.05", value: e.default_strength ?? 0.85 });
+  const notes = el("input", { type: "text", value: e.notes || "", placeholder: "notes" });
+  const hint = el("div", { class: "hint", text: e.auto ? "pre-filled from the file's metadata — saving makes it yours" : "" });
+  const meta = el("button", { text: "from metadata", title: "read the safetensors header again", onclick: async () => {
+    const d = await M.fetchJson("/mmx/registry/metadata?name=" + encodeURIComponent(name));
+    hint.textContent = d.found ? (d.triggers.length ? `metadata (${d.source}): ${d.triggers.join(", ")}` : "the file carries no trigger metadata (keys: " + Object.keys(d.metadata || {}).slice(0, 8).join(", ") + ")") : "file not found in models/loras";
+    if (d.triggers.length) trig.value = d.triggers.join(", ");
+  } });
+  const save = el("button", { class: "primary", text: "Save to registry", onclick: async () => {
+    const body = { name, triggers: trig.value.split(",").map(x => x.trim()).filter(Boolean), phrases: phr.value.split(",").map(x => x.trim()).filter(Boolean), default_strength: parseFloat(str.value) || 0, notes: notes.value };
+    const d = await M.fetchJson("/mmx/registry/set", body);
+    if (d.error) { hint.textContent = "✗ " + d.error; return; }
+    await M.loadRegistry(false); box.hidden = true; renderTriggerLines(node);
+    report(node, [{ cls: "ok", text: `✓ registry: ${name} — triggers: ${body.triggers.join(", ") || "(none)"}; phrases: ${body.phrases.join(", ") || "(none)"} → ${d.path}; NAS mirror ${d.nas?.enabled && d.nas?.configured ? "queued" : "off"}` }]);
+  } });
+  const cancel = el("button", { text: "Cancel", onclick: () => { box.hidden = true; } });
+  box.appendChild(el("div", { class: "row" }, el("span", { class: "lbl", text: "registry" }), el("b", { text: name })));
+  box.appendChild(el("div", { class: "row" }, el("span", { class: "lbl", text: "triggers" }), trig));
+  box.appendChild(el("div", { class: "row" }, el("span", { class: "lbl", text: "phrases" }), phr));
+  box.appendChild(el("div", { class: "row" }, el("span", { class: "lbl", text: "strength" }), str, el("span", { class: "lbl", text: "notes" }), notes));
+  box.appendChild(el("div", { class: "row" }, save, cancel, meta, hint));
+  ui._regRow = i;
 }
 function renderEditor(node) {
   const ui = node._mmxDeck; if (!ui) return;
@@ -338,6 +404,8 @@ function send(node) {
     const rows = M.setStack(t.stack, st.rows); M.highlight(t.stack);
     const eff = M.effectiveRows(rows);
     lines.push({ cls: "ok", text: `✓ ${eff.length} LoRA row${eff.length === 1 ? "" : "s"} on (${eff.map(r => r.name.replace(/\.safetensors$/, "") + "@" + r.strength.toFixed(2)).join(", ") || "none"}) → ${M.label(t.stack)}`, node: t.stack });
+    const info = M.triggersFor(rows);
+    lines.push({ cls: info.triggers.length ? "ok" : "warn", text: info.triggers.length ? `  trigger prefix that will be applied (Stack → Prompt Affix): ${info.triggers.join(", ")}` : "  trigger prefix: (none — no enabled row has trigger words in the registry)" });
   } else lines.push({ cls: "err", text: "✗ no MMX LoRA Stack in the graph — rows not sent" });
   node._mmxDeck.btnUndo.disabled = !(t.manager || t.stack);
   report(node, lines); renderTags(node);
@@ -377,10 +445,12 @@ app.registerExtension({
     node.onConfigure = function (...a) { const r = origConfigure?.apply(this, a); setTimeout(() => renderAll(node), 0); return r; };
     const onGraph = () => { renderTargets(node); renderTags(node); };
     window.addEventListener("mmx-graph-changed", onGraph);
+    const onReg = () => { if (node.graph) { renderRows(node); } };
+    window.addEventListener("mmx-registry-changed", onReg);
     root.addEventListener("mouseenter", onGraph);
     node._mmxTick = setInterval(() => { if (!node.graph) { clearInterval(node._mmxTick); return; } onGraph(); }, 1500);
     const origRemoved = node.onRemoved;
-    node.onRemoved = function (...a) { clearInterval(node._mmxTick); window.removeEventListener("mmx-graph-changed", onGraph); return origRemoved?.apply(this, a); };
-    node.mmxDeck = { send: () => send(node), pull: () => pull(node), undo: () => undo(node), loadPreset: n => loadPreset(node, n), save: o => savePreset(node, o), state: () => readState(node), render: () => renderAll(node), ui: node._mmxDeck };
+    node.onRemoved = function (...a) { clearInterval(node._mmxTick); window.removeEventListener("mmx-graph-changed", onGraph); window.removeEventListener("mmx-registry-changed", onReg); return origRemoved?.apply(this, a); };
+    node.mmxDeck = { send: () => send(node), pull: () => pull(node), undo: () => undo(node), loadPreset: n => loadPreset(node, n), save: o => savePreset(node, o), state: () => readState(node), render: () => renderAll(node), editRegistry: i => openRegistryEditor(node, i), ui: node._mmxDeck };
   },
 });

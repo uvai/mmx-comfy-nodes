@@ -21,6 +21,8 @@ fp = types.ModuleType("folder_paths")
 fp.get_filename_list = lambda kind: list(LORAS) if kind == "loras" else []
 fp.get_input_directory = lambda: os.path.join(TMP, "input")
 fp.get_temp_directory = lambda: os.path.join(TMP, "temp")
+fp.get_full_path = lambda kind, name: os.path.join(TMP, "loras", name) if os.path.isfile(os.path.join(TMP, "loras", name)) else None
+fp.filename_list_cache = {}
 os.makedirs(fp.get_input_directory(), exist_ok=True)
 sys.modules["folder_paths"] = fp
 nd = types.ModuleType("nodes")
@@ -55,6 +57,7 @@ os.environ["MMX_NAS_PROXY"] = "none"
 os.environ["MMX_NAS_KEY"] = os.path.abspath(__file__)          # any existing file = "configured"
 os.environ["MMX_PRESETS"] = os.path.join(TMP, "presets.json")
 os.environ["MMX_PHRASES"] = os.path.join(TMP, "phrases.json")
+os.environ["MMX_LORAS_REGISTRY"] = os.path.join(TMP, "loras.json")
 os.environ["MMX_NAS_SHARE"] = "/volume1/subgenula"
 os.environ["MMX_LIBRARY"] = os.path.join(TMP, "library")
 os.environ["MMX_LIBRARY_THUMBS"] = os.path.join(TMP, "library_thumbs")
@@ -201,6 +204,60 @@ def main():
     check("stack text lists the effective rows", out["result"][2].startswith("1. " + LORAS[1]) and "2. " + LORAS[0] + " @ 1.20" in out["result"][2], out["result"][2])
     check("stack VALIDATE_INPUTS names a missing file, accepts the rest", ls.MMXLoRAStack.VALIDATE_INPUTS(**kw) is True and "ghost.safetensors" in str(ls.MMXLoRAStack.VALIDATE_INPUTS(**{**kw, "lora_1": "ghost.safetensors"})))
     check("stack INPUT_TYPES: 5 x (on, lora, strength) after model/clip", list(ls.MMXLoRAStack.INPUT_TYPES()["required"])[:5] == ["model", "clip", "on_1", "lora_1", "strength_1"] and len(ls.MMXLoRAStack.INPUT_TYPES()["required"]) == 17)
+
+    # LoRA registry: metadata pre-fill, edits win over auto, tombstones survive the mirror, stack outputs, affix
+    reg = importlib.import_module("mmx_presets.registry")
+    affix = importlib.import_module("mmx_presets.affix")
+    import struct
+    def write_st(name, meta):
+        os.makedirs(os.path.join(TMP, "loras"), exist_ok=True)
+        hdr = json.dumps({"__metadata__": meta}).encode()
+        open(os.path.join(TMP, "loras", name), "wb").write(struct.pack("<Q", len(hdr)) + hdr)
+    write_st(LORAS[0], {"ss_tag_frequency": json.dumps({"10_h3": {"h3motion": 40, "fast pan": 38, "blurry": 3, "1girl": 40}})})
+    write_st(LORAS[1], {"modelspec.trigger_phrase": "accel8, turbo mode"})
+    write_st(LORAS[2], {})
+    rg = reg.get_store()
+    n = rg.prefill(LORAS)
+    e0, e1, e2 = rg.get(LORAS[0]), rg.get(LORAS[1]), rg.get(LORAS[2])
+    check("registry pre-fill: ss_tag_frequency top tags (>= 90% of max), modelspec.trigger_phrase split, empty entry for no metadata; all auto/updated 0",
+          n == 3 and e0["triggers"] == ["1girl", "h3motion", "fast pan"] and e0["auto"] and e0["updated"] == 0 and "ss_tag_frequency" in e0["notes"]
+          and e1["triggers"] == ["accel8", "turbo mode"] and e2["triggers"] == [] and e2["auto"], f"{e0} {e1} {e2}")
+    check("pre-fill is idempotent", rg.prefill(LORAS) == 0)
+    e = rg.set(LORAS[0], {"triggers": ["h3motion"], "phrases": ["fast pan", "whip pan", "fast pan"], "default_strength": 0.6, "notes": "mine"})
+    check("registry set: user entry (auto false, updated now), phrases deduped, strength clamped", not e["auto"] and e["updated"] > 0 and e["phrases"] == ["fast pan", "whip pan"] and e["default_strength"] == 0.6 and rg.get(LORAS[0])["triggers"] == ["h3motion"])
+    # merge: the NAS copy (edited elsewhere, newer) wins over a local auto entry; an auto entry never overrides a user edit
+    remote = reg.parse(json.dumps({"updated": 5, "loras": {LORAS[2]: {"triggers": ["sidef"], "phrases": [], "default_strength": 0.9, "notes": "", "updated": 5}}}))
+    m = reg.merge(rg.load(force=True), remote)
+    check("merge: NAS entry (updated 5) beats the local auto entry (updated 0); local user edit kept", m["loras"][LORAS[2]]["triggers"] == ["sidef"] and m["loras"][LORAS[0]]["triggers"] == ["h3motion"])
+    rg.push(); nas_reg = os.path.join(TMP, "nas/volume1/subgenula/mmx/loras.json")
+    check("registry pushed to the NAS", os.path.isfile(nas_reg) and LORAS[0] in json.load(open(nas_reg))["loras"])
+    time.sleep(0.01); rg.delete(LORAS[1]); rg.push()
+    check("registry delete + push: gone on both sides with a tombstone; pre-fill does not re-add it", LORAS[1] not in rg.all() and LORAS[1] not in json.load(open(nas_reg))["loras"]
+          and any(t["name"] == LORAS[1] for t in json.load(open(nas_reg))["deleted"]) and rg.prefill(LORAS) == 0)
+    os.remove(rg.path); rg2 = reg.LoraRegistry(path=rg.path); rg2.load(); rg2.prefill(LORAS); res = rg2.pull()
+    check("registry survives a re-mirror: local file lost -> re-prefilled (auto) -> pull restores the edited entry and keeps the deletion",
+          res["ok"] and rg2.get(LORAS[0])["triggers"] == ["h3motion"] and not rg2.get(LORAS[0])["auto"] and LORAS[1] not in rg2.all(), f"{res} {rg2.all()}")
+    # stack outputs: enabled rows in order, deduped, disabled rows excluded
+    rg.set(LORAS[2], {"triggers": ["sidef", "H3MOTION"], "phrases": ["low angle"]})
+    kw = {}
+    for i in range(1, 6):
+        kw[f"on_{i}"] = False; kw[f"lora_{i}"] = ls.NONE; kw[f"strength_{i}"] = 1.0
+    kw.update(on_1=True, lora_1=LORAS[2], strength_1=0.8, on_2=True, lora_2=LORAS[0], strength_2=0.5, on_3=False, lora_3=LORAS[1], strength_3=1.0)
+    out = ls.MMXLoRAStack().run([], [], **kw)
+    check("Stack outputs triggers (row order, case-insensitive dedupe) and phrases for ENABLED rows only", out["result"][3] == "sidef, H3MOTION" and out["result"][4] == "low angle, fast pan, whip pan", str(out["result"][3:]))
+    check("Stack body lists triggers / phrases under each row", "1. " + LORAS[2] in out["result"][2] and "triggers: sidef, H3MOTION" in out["result"][2] and "phrases: fast pan, whip pan" in out["result"][2] and "→ triggers out: sidef, H3MOTION" in out["result"][2], out["result"][2])
+    kw2 = {**kw, "on_1": False}
+    out2 = ls.MMXLoRAStack().run([], [], **kw2)
+    check("disabling a row removes its triggers from the output", out2["result"][3] == "h3motion", out2["result"][3])
+    check("Stack IS_CHANGED follows the registry file and the rows", ls.MMXLoRAStack.IS_CHANGED([], [], **kw) != ls.MMXLoRAStack.IS_CHANGED([], [], **kw2))
+    # affix
+    check("affix prepend / append / prefix+suffix / no triggers / empty prompt",
+          affix.affix("<Subject 1> walks", auto_triggers=out["result"][3]) == "sidef, H3MOTION, <Subject 1> walks"
+          and affix.affix("<Subject 1> walks", auto_triggers="a, b", mode="append") == "<Subject 1> walks, a, b"
+          and affix.affix("p", "PRE", "SUF", "t") == "PRE\nt, p\nSUF" and affix.affix("p", auto_triggers="") == "p" and affix.affix("", auto_triggers="t") == "t")
+    a_out = affix.MMXPromptAffix().run("<Subject 1> walks", "", "", "prepend", out["result"][3])
+    a_off = affix.MMXPromptAffix().run("<Subject 1> walks", "", "", "prepend", out2["result"][3])
+    check("Stack -> Affix end to end: enabled row's triggers land in front of the prompt; disabled row's do not", a_out["result"][0].startswith("sidef, H3MOTION, <Subject 1>") and a_off["result"][0] == "h3motion, <Subject 1> walks" and a_out["ui"]["text"][0].startswith("triggers (prepend): sidef, H3MOTION"), str(a_out) + str(a_off))
 
     # Deck node: passthrough, never touches the store
     deck = importlib.import_module("mmx_presets.deck")

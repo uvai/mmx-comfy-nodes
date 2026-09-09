@@ -1,8 +1,8 @@
 {
  "id": "mmx-deck",
  "revision": 0,
- "last_node_id": 402,
- "last_link_id": 417,
+ "last_node_id": 403,
+ "last_link_id": 421,
  "nodes": [
   {
    "id": 115,
@@ -514,6 +514,20 @@
      "type": "STRING",
      "links": [],
      "slot_index": 2
+    },
+    {
+     "name": "triggers",
+     "type": "STRING",
+     "links": [
+      421
+     ],
+     "slot_index": 3
+    },
+    {
+     "name": "phrases",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 4
     }
    ],
    "properties": {
@@ -1099,7 +1113,7 @@
      "widget": {
       "name": "prompt"
      },
-     "link": 395
+     "link": 420
     },
     {
      "name": "width",
@@ -1345,8 +1359,7 @@
      "name": "prompt",
      "type": "STRING",
      "links": [
-      394,
-      395
+      418
      ]
     },
     {
@@ -1415,7 +1428,7 @@
      "dir": 3,
      "name": "source",
      "type": "*",
-     "link": 394
+     "link": 419
     }
    ],
    "outputs": [],
@@ -1787,11 +1800,11 @@
    "type": "MMXDeck",
    "pos": [
     -2505.498461246831,
-    6147.275279571166
+    6247.275279571166
    ],
    "size": [
-    840,
-    850
+    860,
+    990
    ],
    "flags": {},
    "order": 0,
@@ -1827,7 +1840,7 @@
    "type": "MMXLibraryImage",
    "pos": [
     -1625.498461246831,
-    6147.275279571166
+    6247.275279571166
    ],
    "size": [
     400,
@@ -1871,7 +1884,7 @@
    "type": "MMXLibraryImage",
    "pos": [
     -1205.498461246831,
-    6147.275279571166
+    6247.275279571166
    ],
    "size": [
     400,
@@ -1909,6 +1922,57 @@
     "Picture 9"
    ],
    "title": "MMX Library Image \u2014 first frame \u2192 Picture 9"
+  },
+  {
+   "id": 403,
+   "type": "MMXPromptAffix",
+   "pos": [
+    -1157.0541372292187,
+    5789.8342454390795
+   ],
+   "size": [
+    520,
+    330
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "prompt",
+     "type": "STRING",
+     "link": 418
+    },
+    {
+     "name": "auto_triggers",
+     "type": "STRING",
+     "widget": {
+      "name": "auto_triggers"
+     },
+     "link": 421
+    }
+   ],
+   "outputs": [
+    {
+     "name": "prompt",
+     "type": "STRING",
+     "links": [
+      419,
+      420
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MMXPromptAffix"
+   },
+   "widgets_values": [
+    "",
+    "",
+    "prepend",
+    ""
+   ],
+   "title": "MMX Prompt Affix (triggers \u2192 prompt)"
   }
  ],
  "links": [
@@ -2249,22 +2313,6 @@
    "LATENT"
   ],
   [
-   394,
-   185,
-   18,
-   186,
-   0,
-   "STRING"
-  ],
-  [
-   395,
-   185,
-   18,
-   184,
-   21,
-   "STRING"
-  ],
-  [
    396,
    115,
    1,
@@ -2359,6 +2407,38 @@
    302,
    0,
    "IMAGE"
+  ],
+  [
+   418,
+   185,
+   18,
+   403,
+   0,
+   "STRING"
+  ],
+  [
+   419,
+   403,
+   0,
+   186,
+   0,
+   "STRING"
+  ],
+  [
+   420,
+   403,
+   0,
+   184,
+   21,
+   "STRING"
+  ],
+  [
+   421,
+   137,
+   3,
+   403,
+   1,
+   "STRING"
   ]
  ],
  "groups": [
@@ -2427,9 +2507,9 @@
    "title": "Deck / Library (push into the Manager)",
    "bounding": [
     -2525.498461246831,
-    6087.275279571166,
-    1760,
-    920
+    6187.275279571166,
+    1780,
+    1070
    ],
    "color": "#a1309b",
    "flags": {}

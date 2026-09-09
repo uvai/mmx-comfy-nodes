@@ -17,6 +17,12 @@ button and by tooling:
   POST /mmx/library/inject          -> body {path, slot}: copy the library file into ComfyUI/input
                                        -> {filename, kind, frame_png} for the References Manager
   GET  /mmx/status                  -> {openrouter_key: bool, refpack: bool, manager: bool, presets, phrases}
+  GET  /mmx/registry                -> {loras:{file:{triggers, phrases, default_strength, notes, auto}}, path, nas}
+  POST /mmx/registry/refresh        -> pull from the NAS, pre-fill new files from their metadata; same shape
+  POST /mmx/registry/set            -> body {name, triggers, phrases, default_strength, notes} (+ NAS push)
+  POST /mmx/registry/delete         -> body {name}                                            (+ NAS push)
+  GET  /mmx/registry/metadata?name= -> {metadata: {...}, triggers: [...], source} straight from the file
+  POST /mmx/registry/for_rows       -> body {rows:[{name, on}]} -> {triggers, phrases, per_row}
   GET  /mmx/library                 -> {root, items:[{path, name, folder, kind, size, mtime}], count, sync}
   POST /mmx/library/refresh[?sync=1]-> re-scan the mirror (sync=1: start the NAS mirror script first)
   GET  /mmx/library/thumb?path=<rel>[&w=320] -> image/jpeg (first frame for videos)
@@ -29,6 +35,7 @@ import json
 from . import store as S
 from . import library as L
 from . import phrases as P
+from . import registry as REG
 
 
 def _payload(st: S.PresetStore) -> dict:
@@ -154,6 +161,73 @@ def register(server_instance) -> bool:
         ph.push_async()
         return web.json_response(_phrases_payload())
 
+    # ── LoRA registry ──
+    reg = REG.get_store()
+
+    def _registry_payload():
+        return {"loras": reg.all(), "updated": reg.data["updated"], "path": reg.path, "nas": reg.nas_status()}
+
+    def _lora_files():
+        try:
+            from . import lora_stack as LS
+            return LS.lora_names(refresh=True)[1:]
+        except Exception:
+            return []
+
+    @routes.get("/mmx/registry")
+    async def registry_get(request):
+        return web.json_response(_registry_payload())
+
+    @routes.post("/mmx/registry/refresh")
+    async def registry_refresh(request):
+        pulled = reg.pull()
+        added = reg.prefill(_lora_files())
+        if added:
+            reg.push_async()
+        out = _registry_payload(); out["pull"] = pulled; out["prefilled"] = added
+        return web.json_response(out)
+
+    @routes.post("/mmx/registry/set")
+    async def registry_set(request):
+        try:
+            body = await request.json()
+            e = reg.set(str(body.get("name", "")), body)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+        reg.push_async()
+        out = _registry_payload(); out["saved"] = e
+        return web.json_response(out)
+
+    @routes.post("/mmx/registry/delete")
+    async def registry_delete(request):
+        try:
+            body = await request.json()
+            ok = reg.delete(str(body.get("name", "")))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if ok:
+            reg.push_async()
+        out = _registry_payload(); out["deleted"] = ok
+        return web.json_response(out)
+
+    @routes.get("/mmx/registry/metadata")
+    async def registry_metadata(request):
+        name = request.query.get("name", "")
+        path = reg.lora_path(name)
+        meta = REG.read_metadata(path) if path else {}
+        trig, src = REG.triggers_from_metadata(meta)
+        keep = {k: (v if len(str(v)) < 4000 else str(v)[:4000] + "…") for k, v in meta.items()}
+        return web.json_response({"name": name, "found": bool(path), "metadata": keep, "triggers": trig, "source": src})
+
+    @routes.post("/mmx/registry/for_rows")
+    async def registry_for_rows(request):
+        try:
+            body = await request.json()
+            rows = [r for r in (body.get("rows") or []) if r.get("name") and r.get("name") != "(none)" and r.get("on", True) is not False]
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response(reg.for_rows(rows))
+
     @routes.post("/mmx/library/inject")
     async def library_inject(request):
         try:
@@ -169,7 +243,7 @@ def register(server_instance) -> bool:
         from . import manager as M
         return web.json_response({"openrouter_key": bool(M.resolve_key("")), "refpack": M._BASE is not None,
                                   "manager": "MMXReferencesManager" in M.NODE_CLASS_MAPPINGS, "refpack_reason": M._REASON,
-                                  "presets": len(st.load()["presets"]), "phrases": sum(len(g["phrases"]) for g in ph.load()["groups"]),
+                                  "presets": len(st.load()["presets"]), "phrases": sum(len(g["phrases"]) for g in ph.load()["groups"]), "registry": len(reg.all()),
                                   "presets_path": st.path, "phrases_path": ph.path})
 
     def _library_payload():

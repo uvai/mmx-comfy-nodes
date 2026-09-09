@@ -134,6 +134,22 @@ export function clearReferenceSlot(node, spec) {
   return { requested: s.spec, removed: gone.file };
 }
 
+// ── LoRA registry (triggers / phrases per LoRA file, mirrored via mmx/loras.json) ─────────
+export const registry = { loras: {}, loaded: false, path: "" };
+export async function loadRegistry(refresh) {
+  const d = await fetchJson(refresh ? "/mmx/registry/refresh" : "/mmx/registry", refresh ? {} : null);
+  registry.loras = d.loras || {}; registry.loaded = true; registry.path = d.path || "";
+  try { window.dispatchEvent(new CustomEvent("mmx-registry-changed")); } catch (e) {}
+  return d;
+}
+function dedupe(items) { const out = [], seen = new Set(); for (const t of items) { const k = String(t).trim(); if (k && !seen.has(k.toLowerCase())) { seen.add(k.toLowerCase()); out.push(k); } } return out; }
+// {triggers, phrases, per_row} for the ENABLED rows in row order (same rule as the Stack's outputs)
+export function triggersFor(rows) {
+  const eff = effectiveRows(rows);
+  const per = eff.map(r => { const e = registry.loras[r.name] || {}; return { name: r.name, triggers: [...(e.triggers || [])], phrases: [...(e.phrases || [])] }; });
+  return { triggers: dedupe(per.flatMap(p => p.triggers)), phrases: dedupe(per.flatMap(p => p.phrases)), per_row: per };
+}
+
 // ── LoRA stack rows ──────────────────────────────────────────────────────────
 export function getStack(node) {
   const rows = [];
@@ -169,7 +185,16 @@ export function setStack(node, rows) {
 export function effectiveRows(rows) { return normalizeRows(rows).filter(r => r.on && r.name !== NONE && r.strength > 0); }
 export function describeStack(rows) {
   const eff = effectiveRows(rows);
-  return eff.length ? eff.map((r, i) => `${i + 1}. ${r.name} @ ${r.strength.toFixed(2)}`).join("\n") : "(no LoRA enabled — model/clip pass through)";
+  if (!eff.length) return "(no LoRA enabled — model/clip pass through)";
+  const info = triggersFor(rows), lines = [];
+  eff.forEach((r, i) => {
+    lines.push(`${i + 1}. ${r.name} @ ${r.strength.toFixed(2)}`);
+    const e = info.per_row[i] || {};
+    if (e.triggers?.length) lines.push("     triggers: " + e.triggers.join(", "));
+    if (e.phrases?.length) lines.push("     phrases: " + e.phrases.join(", "));
+  });
+  if (info.triggers.length) lines.push("→ triggers out: " + info.triggers.join(", "));
+  return lines.join("\n");
 }
 
 // ── canvas helpers ───────────────────────────────────────────────────────────
@@ -216,7 +241,7 @@ window.mmx = {
   nodeById, findManagers, findStacks, findLibraries, defaultManager, defaultStack, remember, remembered,
   getReferences, setReferences, tagsOf, setReferenceSlot, clearReferenceSlot, parseSlot,
   getDirection, setDirection, refreshManager,
-  getStack, setStack, describeStack, effectiveRows,
+  getStack, setStack, describeStack, effectiveRows, registry, loadRegistry, triggersFor,
   jumpTo, highlight, injectLibrary, label,
 };
 export default window.mmx;

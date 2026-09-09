@@ -5,8 +5,12 @@ Replaces the Power Lora Loader (rgthree) in the daily graph; the turbo LoRA node
 """
 from __future__ import annotations
 
+import os
+
 import folder_paths
 import nodes as core_nodes
+
+from . import registry as REG
 
 ROWS = 5
 NONE = "(none)"
@@ -40,11 +44,23 @@ def effective(rows: list) -> list:
     return [r for r in rows if r["on"] and r["name"] and r["name"] != NONE and r["strength"] != 0.0]
 
 
-def describe(rows: list) -> str:
+def describe(rows: list, info: dict | None = None) -> str:
+    """Effective rows, each followed by its registry triggers / phrases when it has any."""
     eff = effective(rows)
     if not eff:
         return "(no LoRA enabled — model/clip pass through)"
-    return "\n".join(f"{i}. {r['name']} @ {r['strength']:.2f}" for i, r in enumerate(eff, start=1))
+    per = {p["name"]: p for p in (info or {}).get("per_row", [])}
+    lines = []
+    for i, r in enumerate(eff, start=1):
+        lines.append(f"{i}. {r['name']} @ {r['strength']:.2f}")
+        e = per.get(r["name"]) or {}
+        if e.get("triggers"):
+            lines.append("     triggers: " + ", ".join(e["triggers"]))
+        if e.get("phrases"):
+            lines.append("     phrases: " + ", ".join(e["phrases"]))
+    if info and info.get("triggers"):
+        lines.append("→ triggers out: " + ", ".join(info["triggers"]))
+    return "\n".join(lines)
 
 
 class MMXLoRAStack:
@@ -59,11 +75,19 @@ class MMXLoRAStack:
                                              "tooltip": "applied to model and clip alike"})
         return {"required": req}
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES = ("model", "clip", "stack")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("model", "clip", "stack", "triggers", "phrases")
     FUNCTION = "run"
     CATEGORY = "mmx"
-    DESCRIPTION = "Five LoRA rows (lora, strength, on) as plain widgets; enabled rows applied in order. The Deck's Send writes these rows."
+    DESCRIPTION = "Five LoRA rows (lora, strength, on) as plain widgets; enabled rows applied in order. triggers / phrases: the registry's words for the enabled rows (row order, deduped, ', '-joined) — wire triggers into MMX Prompt Affix."
+
+    @classmethod
+    def IS_CHANGED(cls, model, clip, **kw):
+        try:
+            st = os.stat(REG.get_store().path); reg = f"{st.st_mtime_ns}:{st.st_size}"
+        except OSError:
+            reg = "noreg"
+        return reg + "|" + "|".join(f"{r['name']}:{r['strength']}:{r['on']}" for r in rows_from_kwargs(kw))
 
     @classmethod
     def VALIDATE_INPUTS(cls, **kw):
@@ -80,9 +104,10 @@ class MMXLoRAStack:
         loader = core_nodes.LoraLoader()
         for r in effective(rows):
             model, clip = loader.load_lora(model, clip, r["name"], r["strength"], r["strength"])
-        text = describe(rows)
+        info = REG.get_store().for_rows(effective(rows))
+        text = describe(rows, info)
         print("[mmx-lora-stack] " + text.replace("\n", " | "))
-        return {"ui": {"text": [text]}, "result": (model, clip, text)}
+        return {"ui": {"text": [text]}, "result": (model, clip, text, ", ".join(info["triggers"]), ", ".join(info["phrases"]))}
 
 
 NODE_CLASS_MAPPINGS = {"MMXLoRAStack": MMXLoRAStack}
