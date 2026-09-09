@@ -43,6 +43,21 @@ def sync_log() -> str:
     return os.environ.get("MMX_LIBRARY_SYNC_LOG") or ("/workspace/mmx_library_sync.log" if os.path.isdir("/workspace") else os.path.join(thumbs_dir(), "sync.log"))
 
 
+def last_log_line() -> str:
+    """The last non-empty line of the mirror log, without its timestamp — what the node shows
+    while the library is empty ("waiting: share … is LOCKED …", "gave up after …", "done: N files")."""
+    try:
+        with open(sync_log(), "rb") as f:
+            f.seek(0, 2); n = f.tell(); f.seek(max(0, n - 8000)); tail = f.read().decode(errors="replace")
+    except OSError:
+        return "(no mirror log yet — the boot mirror has not started, or this host has no NAS path)"
+    lines = [l.strip() for l in tail.splitlines() if l.strip()]
+    if not lines:
+        return "(mirror log is empty)"
+    line = lines[-1]
+    return line.split(" ", 1)[1] if line[:4].isdigit() and " " in line else line
+
+
 def kind_of(name: str) -> str | None:
     ext = os.path.splitext(name)[1].lower()
     if ext in IMAGE_EXT:
@@ -97,7 +112,9 @@ def paths(force: bool = False) -> list:
 def check_path(rel: str) -> str:
     """Validate a library-relative path and return the absolute file path."""
     rel = (rel or "").strip().replace("\\", "/")
-    if not rel or rel == NONE or rel.startswith("/") or ".." in rel.split("/"):
+    if not rel or rel == NONE:
+        raise ValueError(f"MMX Library: the library is empty — last mirror log: {last_log_line()}")
+    if rel.startswith("/") or ".." in rel.split("/"):
         raise ValueError(f"MMX Library: bad path {rel!r}")
     p = os.path.join(root(), rel)
     if not os.path.isfile(p):
@@ -188,7 +205,7 @@ def sync_status() -> dict:
     except OSError:
         pass
     return {"script": sync_script(), "available": os.path.isfile(sync_script()), "running": running, "started": _sync["started"],
-            "last": _sync["last"], "log": sync_log(), "log_tail": tail[-1500:], "root": root(), "exists": os.path.isdir(root())}
+            "last": _sync["last"], "log": sync_log(), "log_tail": tail[-1500:], "last_line": last_log_line(), "root": root(), "exists": os.path.isdir(root())}
 
 
 def start_sync() -> dict:

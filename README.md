@@ -7,7 +7,9 @@ MMX LoRA Stack, Library → References Manager injection, an MMX References Mana
 skippable First Frame Check — see "The deck build" below and `examples/deck.json`.
 
 Installed by `additional_params.sh` in `uvai/base-image` next to `ComfyUI-MiniMaxRefPack`
-(`git clone https://github.com/uvai/mmx-comfy-nodes` into `custom_nodes`). Manual install:
+(`git clone https://github.com/uvai/mmx-comfy-nodes` into `custom_nodes`, and on EVERY boot
+`fetch --depth 1 origin main` + `reset --hard origin/main`, logging the commit as
+`[additional_params] mmx-comfy-nodes at <sha> <date> <subject>`). Manual install:
 
 ```
 cd /ComfyUI/custom_nodes && git clone https://github.com/uvai/mmx-comfy-nodes && restart ComfyUI
@@ -188,13 +190,19 @@ way (a websocket event carries it before the exception aborts the node's normal 
 
 ## Library (MMX Library Image)
 
-`/workspace/mmx/library` (env `MMX_LIBRARY` overrides) mirrors `Subjects`, `VideoRef` and `Sets`
-from `/volume1/subgenula` at boot: `additional_params.sh` section 3c copies
-`tools/mmx_library_sync.sh` to `/root/mmx_library_sync.sh` and runs it detached with `--wait`
-(it waits up to 10 min for the nas_worker to bring up tailscale + `/root/.ssh/mmx_nas_key`, then
-`rsync -rt --delete --max-size 1500m` per folder over the same SOCKS ssh path). A locked share,
-a missing key or an unreachable NAS is a logged skip (`/workspace/mmx_library_sync.log`), exit 0;
-the node keeps working on whatever is mirrored. Folders absent on the share (`Sets`) are skipped.
+`/workspace/mmx/library` (env `MMX_LIBRARY` overrides) mirrors `Subjects`, `Sets` and `VideoRef`
+(each recursively) from `/volume1/subgenula` at boot: `additional_params.sh` section 3c copies
+`tools/mmx_library_sync.sh` to `/root/mmx_library_sync.sh` and runs it detached with `--wait`:
+it polls every 60 s for up to 2 h (`MMX_LIBRARY_WAIT_SECS` / `MMX_LIBRARY_WAIT_TRIES`) until the
+key exists, the NAS answers AND the share is unlocked — the share is normally still locked when
+the instance comes up — then `rsync -rt --delete --max-size 1500m` per folder over the same SOCKS
+ssh path. The log (`/workspace/mmx_library_sync.log`) gets one line per state change plus a
+heartbeat every 10 attempts ("waiting: share … is LOCKED … (attempt 4/120)"), a "gave up after N
+attempt(s)" line at the end of the window, and "done: N files". The node's `⇣ Mirror from NAS`
+button re-runs the script as a single attempt. While the library is empty the node body shows
+the last mirror log line, so it is visible in the graph why there is nothing to pick (locked
+share, no key yet, unreachable NAS), and queueing the empty placeholder fails with that same
+line. Folders absent on the share are skipped.
 
 In the node: the dropdown lists every image / video under the mirror as `Folder/sub/file`; the
 `search` box filters it live; the thumbnail (first frame for videos) is drawn in the node;

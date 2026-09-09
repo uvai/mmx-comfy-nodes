@@ -11,7 +11,7 @@ import * as M from "./mmx_api.js";
 const RESULT_NODES = ["MMXFirstFrameCheck", "MMXChainGate", "MMXLibraryImage", "MMXReferencesBuilder", "MMXSaveFrame", "MMXLoRAStack"];
 const LIB_NONE = "(library empty — press Refresh / Mirror from NAS)";
 const COLORS = { pass: { color: "#1f4d2b", bgcolor: "#27603a" }, fail: { color: "#5a1f1f", bgcolor: "#7a2a2a" } };
-let lib = { paths: [], items: {}, root: "", loaded: false };
+let lib = { paths: [], items: {}, root: "", loaded: false, lastLine: "" };
 
 function resultWidget(node) {
   let w = node.widgets?.find(w => w.name === "mmx_result");
@@ -117,7 +117,7 @@ function setupInjectButtons(node) {
 async function fetchLibrary(refresh, sync) {
   const r = refresh ? await api.fetchApi("/mmx/library/refresh" + (sync ? "?sync=1" : ""), { method: "POST" }) : await api.fetchApi("/mmx/library");
   const d = await r.json();
-  lib.paths = d.paths || []; lib.root = d.root || ""; lib.items = {}; lib.loaded = true;
+  lib.paths = d.paths || []; lib.root = d.root || ""; lib.items = {}; lib.loaded = true; lib.lastLine = d.sync?.last_line || "";
   for (const it of d.items || []) lib.items[it.path] = it;
   return d;
 }
@@ -131,6 +131,7 @@ function applyFilter(node) {
   let values = lib.paths.filter(p => terms.every(t => p.toLowerCase().includes(t)));
   if (!values.length) values = lib.paths.length ? [] : [LIB_NONE];
   fw.options.values = values.length ? values : [terms.length ? `(no match for "${q}")` : LIB_NONE];
+  if (!lib.paths.length) showResult(node, `library empty (${lib.root || "mirror root unknown"}) — last mirror log:\n${lib.lastLine || "(no mirror log yet)"}\nThe boot mirror retries every 60 s for 2 h while the share is locked; unlock it in vgo, or press Mirror from NAS.`);
   if (!fw.options.values.includes(fw.value)) {
     // keep a valid selection: the first match when filtering, else leave the stored value alone
     if (values.length && terms.length) { fw.value = values[0]; loadThumb(node); }

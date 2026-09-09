@@ -334,6 +334,9 @@ def main():
         open(os.environ["MMX_LIBRARY_SYNC"], "w").write(f"#!/usr/bin/env bash\necho '[library-sync] done: 1 files' >> {os.environ['MMX_LIBRARY_SYNC_LOG']}\n")
         st = lib.start_sync(); time.sleep(0.6); st2 = lib.sync_status()
         check("Mirror from NAS with the script: started, finished rc 0, log tail visible", st["started_now"] and not st2["running"] and st2["last"]["rc"] == 0 and "done: 1 files" in st2["log_tail"], str(st2))
+        open(os.environ["MMX_LIBRARY_SYNC_LOG"], "a").write("2026-09-09T07:00:00Z [library-sync] waiting: share /volume1/subgenula is LOCKED (unlock it in the vgo dashboard) — retry in 60s (attempt 3/120)\n")
+        check("last_log_line strips the timestamp; the empty-library error carries it", lib.last_log_line().startswith("[library-sync] waiting: share") and "attempt 3/120" in lib.last_log_line()
+              and "attempt 3/120" in str(lib.MMXLibraryImage.VALIDATE_INPUTS(lib.NONE)) and "last mirror log" in str(lib.MMXLibraryImage.VALIDATE_INPUTS("")) and "last_line" in lib.sync_status(), str(lib.MMXLibraryImage.VALIDATE_INPUTS(lib.NONE)))
     except ImportError as e:
         print(f"skip check/gate/library checks (no torch/PIL here: {e})")
 

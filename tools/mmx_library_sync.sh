@@ -5,15 +5,17 @@
 # button re-runs it. Same ssh path as the nas_worker (mmx_nas_key + SOCKS via userspace
 # tailscaled). A locked share, a missing key or an unreachable NAS is a logged skip, exit 0.
 #
-#   mmx_library_sync.sh [--wait]     --wait: give the nas_worker up to 10 min to bring up
-#                                    tailscale + the key before giving up (boot use)
+#   mmx_library_sync.sh [--wait]     --wait (boot use): poll every 60 s for up to 2 h until the
+#                                    NAS is reachable AND the share is unlocked, then mirror;
+#                                    without it: one attempt (the node's Mirror button)
 # Env: MMX_NAS (user@host, default from NAS_DEST), MMX_NAS_KEY, MMX_NAS_SHARE, MMX_LIBRARY,
-#      MMX_LIBRARY_FOLDERS (default "Subjects VideoRef Sets"), MMX_LIBRARY_MAX_SIZE (rsync
-#      --max-size, default 1500m), MMX_NAS_PROXY (set to "none" to skip the SOCKS hop)
+#      MMX_LIBRARY_FOLDERS (default "Subjects Sets VideoRef", each mirrored recursively),
+#      MMX_LIBRARY_MAX_SIZE (rsync --max-size, default 1500m), MMX_NAS_PROXY ("none" = no SOCKS
+#      hop), MMX_LIBRARY_WAIT_TRIES / MMX_LIBRARY_WAIT_SECS (default 120 x 60 s)
 set -u
 LOG="${MMX_LIBRARY_SYNC_LOG:-/workspace/mmx_library_sync.log}"
 DEST="${MMX_LIBRARY:-/workspace/mmx/library}"
-FOLDERS="${MMX_LIBRARY_FOLDERS:-Subjects VideoRef Sets}"
+FOLDERS="${MMX_LIBRARY_FOLDERS:-Subjects Sets VideoRef}"
 SHARE="${MMX_NAS_SHARE:-/volume1/subgenula}"
 KEY="${MMX_NAS_KEY:-/root/.ssh/mmx_nas_key}"
 MAXSIZE="${MMX_LIBRARY_MAX_SIZE:-1500m}"
@@ -39,25 +41,38 @@ PROXY="${MMX_NAS_PROXY:-nc -X 5 -x 127.0.0.1:1055 %h %p}"
 SSH="ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=accept-new"
 [ "$PROXY" != "none" ] && SSH="$SSH -o ProxyCommand='$PROXY'"
 
-# wait for the nas_worker to have put the key + tailscale in place (boot), or bail
-tries=1; [ "$WAIT" = 1 ] && tries=60
-for i in $(seq 1 $tries); do
-    if [ -f "$KEY" ] && eval "$SSH" "$USERHOST" "\"true\"" >/dev/null 2>&1; then break; fi
-    if [ "$i" = "$tries" ]; then
-        [ -f "$KEY" ] && log "NAS $USERHOST unreachable — skipped (existing mirror kept: $(find "$DEST" -type f 2>/dev/null | wc -l) files)" \
-                      || log "NAS key $KEY not present — skipped"
+# Boot (--wait): poll until the key exists, the NAS answers AND the share is unlocked — the share
+# is normally still locked when the instance comes up and gets unlocked from the vgo dashboard
+# later. One line per state change plus a heartbeat every 10 attempts, so the log tail (shown in
+# the Library Image node) always says what it is waiting for. Without --wait: one attempt.
+TRIES=1; SECS="${MMX_LIBRARY_WAIT_SECS:-60}"
+[ "$WAIT" = 1 ] && TRIES="${MMX_LIBRARY_WAIT_TRIES:-120}"
+share_state() {
+    eval "$SSH" "$USERHOST" "\"if mount | grep -q ' $SHARE type ecryptfs'; then echo mounted; elif [ -d '$SHARE' ]; then echo plain; else echo locked; fi\"" 2>>"$LOG"
+}
+STATE=""; LASTWHY=""
+for i in $(seq 1 $TRIES); do
+    if [ ! -f "$KEY" ]; then WHY="NAS key $KEY not present yet"
+    elif ! eval "$SSH" "$USERHOST" "\"true\"" >/dev/null 2>&1; then WHY="NAS $USERHOST unreachable"
+    else
+        STATE=$(share_state)
+        case "$STATE" in
+            mounted|plain) WHY="";;
+            locked) WHY="share $SHARE is LOCKED (unlock it in the vgo dashboard)";;
+            *) WHY="could not judge the share state (got '$STATE')";;
+        esac
+    fi
+    [ -z "$WHY" ] && break
+    if [ "$i" = "$TRIES" ]; then
+        log "gave up after $i attempt(s): $WHY — skipped (existing mirror kept: $(find "$DEST" -type f 2>/dev/null | wc -l) files); press Mirror from NAS once the share is unlocked"
         exit 0
     fi
-    sleep 10
+    if [ "$WHY" != "$LASTWHY" ] || [ $((i % 10)) = 0 ]; then
+        log "waiting: $WHY — retry in ${SECS}s (attempt $i/$TRIES)"; LASTWHY="$WHY"
+    fi
+    sleep "$SECS"
 done
-
-# locked share = the ecryptfs mount is absent (same probe as the runner / preset store)
-STATE=$(eval "$SSH" "$USERHOST" "\"if mount | grep -q ' $SHARE type ecryptfs'; then echo mounted; elif [ -d '$SHARE' ]; then echo plain; else echo locked; fi\"" 2>>"$LOG")
-case "$STATE" in
-    mounted|plain) ;;
-    locked) log "share $SHARE is LOCKED — skipped (unlock it in the vgo dashboard, then press Mirror from NAS)"; exit 0 ;;
-    *) log "could not judge the share state (got '$STATE') — skipped"; exit 0 ;;
-esac
+log "NAS reachable, share $SHARE $STATE — mirroring $FOLDERS (recursive)"
 
 command -v rsync >/dev/null 2>&1 || apt-get install -y -qq rsync >>"$LOG" 2>&1
 ok=1; total=0
