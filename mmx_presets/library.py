@@ -15,6 +15,8 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 VIDEO_EXT = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
 FOLDERS = ("Subjects", "VideoRef", "Sets")
 NONE = "(library empty — press Refresh / Mirror from NAS)"
+SLOT_NONE = "(none)"
+SLOTS = [SLOT_NONE] + [f"Picture {i}" for i in range(1, 10)] + [f"Video {i}" for i in range(1, 4)] + ["Audio 1"]
 SCAN_TTL = 20.0
 
 
@@ -202,6 +204,31 @@ def start_sync() -> dict:
     return {**sync_status(), "started_now": True}
 
 
+# ── inject (Library node -> References Manager slot) ─────────────────────────
+
+def inject_file(rel: str, input_dir: str, slot: str = "") -> dict:
+    """Copy a library file into ComfyUI/input for the References Manager and describe it:
+    {filename, kind, path, frame_png}. A video going into a Picture slot also gets its first
+    frame written as <flat>__frame0.png so the slot receives an image (frame_png set)."""
+    src = check_path(rel)
+    dst = copy_to_input(rel, input_dir)
+    kind = kind_of(src)
+    out = {"filename": os.path.basename(dst), "kind": kind, "path": src, "frame_png": None, "slot": slot or SLOT_NONE}
+    if kind == "video":
+        ff = first_frame_png(src)
+        fdst = os.path.join(input_dir, os.path.splitext(input_name(rel))[0] + "__frame0.png")
+        try:
+            s, d = os.stat(ff), os.stat(fdst)
+            same = s.st_size == d.st_size and abs(s.st_mtime - d.st_mtime) < 1.0
+        except OSError:
+            same = False
+        if not same:
+            tmp = fdst + ".part"
+            shutil.copy2(ff, tmp); os.replace(tmp, fdst)
+        out["frame_png"] = os.path.basename(fdst)
+    return out
+
+
 # ── node ─────────────────────────────────────────────────────────────────────
 
 class MMXLibraryImage:
@@ -212,6 +239,8 @@ class MMXLibraryImage:
     def INPUT_TYPES(cls):
         return {"required": {
             "file": (paths(), {"tooltip": "Subjects / VideoRef / Sets under " + root() + " — type in the search box of the node to filter; Refresh re-scans, Mirror from NAS re-syncs."}),
+        }, "optional": {
+            "slot": (SLOTS, {"default": SLOT_NONE, "tooltip": "References Manager slot the Inject button writes this file into (Picture n = n-th image; a video into a Picture slot contributes its first frame)"}),
         }}
 
     RETURN_TYPES = ("IMAGE", "STRING", "STRING")
@@ -221,14 +250,14 @@ class MMXLibraryImage:
     DESCRIPTION = "Library file -> IMAGE (first frame for videos) + the filename copied into ComfyUI/input + the library path."
 
     @classmethod
-    def IS_CHANGED(cls, file):
+    def IS_CHANGED(cls, file, slot=SLOT_NONE):
         try:
             st = os.stat(check_path(file)); return f"{file}:{st.st_size}:{st.st_mtime_ns}"
         except Exception:
             return f"{file}:missing"
 
     @classmethod
-    def VALIDATE_INPUTS(cls, file):
+    def VALIDATE_INPUTS(cls, file, slot=SLOT_NONE):
         # our own check instead of the combo-list check, so a file picked after a Refresh queues even
         # though the enum ComfyUI cached at load time does not list it
         try:
@@ -237,7 +266,7 @@ class MMXLibraryImage:
             return str(e)
         return True
 
-    def run(self, file):
+    def run(self, file, slot=SLOT_NONE):
         import folder_paths
         src = check_path(file)
         dst = copy_to_input(file, folder_paths.get_input_directory())

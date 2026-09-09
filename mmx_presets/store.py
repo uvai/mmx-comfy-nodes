@@ -5,22 +5,28 @@ One JSON file, `/workspace/mmx/presets.json` by default (env MMX_PRESETS overrid
 (`/volume1/subgenula/mmx/presets.json`) over the same ssh path the instance's NAS sync uses, so
 presets survive a re-rent.
 
-File schema:
+File schema (version 1, unchanged keys; `on` on a LoRA row and the `deleted` list are 0.3
+additions that older readers ignore):
     {"version": 1, "updated": <unix float>,
-     "presets": [{"name", "prompt", "loras": [{"name", "strength"}], "notes", "created", "updated"}]}
+     "presets": [{"name", "prompt", "loras": [{"name", "strength", "on"}], "notes", "created", "updated"}],
+     "deleted": [{"name", "at"}]}
 
 Merge rule between the local file and the NAS copy: union by name, the entry with the newer
-`updated` wins. Pure Python, no ComfyUI imports, so it is unit-testable and importable by the
-runner.
+`updated` wins. A deletion leaves a tombstone in `deleted` so the merge does not resurrect the
+preset from the other side (a preset saved AFTER the tombstone wins and clears it). Pure Python,
+no ComfyUI imports, so it is unit-testable and importable by the runner.
+
+The NAS transport (`nas_pull_file` / `nas_push_file`) is shared with the phrase store.
 """
 from __future__ import annotations
 
 import json, os, subprocess, tempfile, threading, time
 
 VERSION = 1
-MAX_LORAS = 3
+MAX_LORAS = 5
 DEFAULT_STRENGTH = 0.85
 NAS_REL = "mmx/presets.json"
+TOMBSTONE_TTL = 120 * 86400   # tombstones older than this are pruned on write
 
 
 def default_path() -> str:
@@ -73,6 +79,49 @@ def _q(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+# ── NAS transport (shared by the preset and phrase stores) ───────────────────
+
+def _nas(cfg: dict, cmd: str, stdin: bytes | None = None, timeout: int = 40):
+    r = subprocess.run(_ssh_cmd(cfg) + [cfg["userhost"], cmd], input=stdin, capture_output=True, timeout=timeout)
+    return r.returncode, r.stdout, r.stderr.decode(errors="replace").strip()
+
+
+def nas_pull_file(cfg: dict, rel: str) -> tuple:
+    """(status, body_bytes, reason): status is 'file' | 'nofile' | 'locked' | 'error'."""
+    remote = os.path.join(cfg["share"], rel)
+    share = cfg["share"]
+    cmd = (f"if ! mount | grep -q {_q(' ' + share + ' type ecryptfs')} && [ ! -d {_q(share)} ]; then echo MMX_LOCKED; exit 0; fi; "
+           f"if [ -f {_q(remote)} ]; then echo MMX_FILE; cat {_q(remote)}; else echo MMX_NOFILE; fi")
+    try:
+        rc, out, err = _nas(cfg, cmd)
+    except subprocess.TimeoutExpired:
+        return "error", b"", "NAS unreachable (timeout)"
+    if rc != 0:
+        return "error", b"", "NAS ssh failed: " + (err.splitlines()[-1] if err else f"rc={rc}")
+    head, _, body = out.partition(b"\n")
+    tag = head.strip().decode(errors="replace")
+    if tag == "MMX_LOCKED":
+        return "locked", b"", "share is locked"
+    if tag == "MMX_NOFILE":
+        return "nofile", b"", "no file on the NAS yet"
+    if tag == "MMX_FILE":
+        return "file", body, None
+    return "error", b"", "unexpected NAS reply: " + tag[:80]
+
+
+def nas_push_file(cfg: dict, rel: str, payload: bytes) -> tuple:
+    """(ok, reason). Atomic write (tmp + mv) under the share."""
+    remote = os.path.join(cfg["share"], rel)
+    cmd = (f"mkdir -p {_q(os.path.dirname(remote))} && cat > {_q(remote + '.tmp')} && mv -f {_q(remote + '.tmp')} {_q(remote)} && echo MMX_PUSHED")
+    try:
+        rc, out, err = _nas(cfg, cmd, stdin=payload)
+    except subprocess.TimeoutExpired:
+        return False, "NAS unreachable (timeout)"
+    if rc != 0 or b"MMX_PUSHED" not in out:
+        return False, "NAS write failed: " + (err.splitlines()[-1] if err else f"rc={rc}")
+    return True, None
+
+
 # ── schema ───────────────────────────────────────────────────────────────────
 
 class PresetError(ValueError):
@@ -89,7 +138,14 @@ def normalize_lora(l) -> dict:
         strength = float(l.get("strength", DEFAULT_STRENGTH))
     except (TypeError, ValueError):
         raise PresetError(f"lora {name}: strength must be a number")
-    return {"name": name, "strength": strength}
+    out = {"name": name, "strength": strength}
+    if l.get("on") is False or str(l.get("on")).lower() in ("false", "0", "off"):
+        out["on"] = False
+    return out
+
+
+def lora_enabled(l: dict) -> bool:
+    return l.get("on", True) is not False
 
 
 def normalize_preset(p: dict, now: float | None = None) -> dict:
@@ -97,7 +153,7 @@ def normalize_preset(p: dict, now: float | None = None) -> dict:
     name = str(p.get("name") or "").strip()
     if not name:
         raise PresetError("preset has no name")
-    loras = [normalize_lora(l) for l in (p.get("loras") or []) if l]
+    loras = [normalize_lora(l) for l in (p.get("loras") or []) if l and (not isinstance(l, dict) or (l.get("name") or l.get("lora")))]
     if len(loras) > MAX_LORAS:
         raise PresetError(f"preset {name}: at most {MAX_LORAS} LoRAs")
     return {"name": name, "prompt": str(p.get("prompt") or p.get("text") or ""), "loras": loras,
@@ -106,7 +162,18 @@ def normalize_preset(p: dict, now: float | None = None) -> dict:
 
 
 def empty() -> dict:
-    return {"version": VERSION, "updated": 0.0, "presets": []}
+    return {"version": VERSION, "updated": 0.0, "presets": [], "deleted": []}
+
+
+def _tombstones(data) -> list:
+    out = []
+    for t in (data.get("deleted") or []) if isinstance(data, dict) else []:
+        try:
+            if t.get("name"):
+                out.append({"name": str(t["name"]), "at": float(t.get("at") or 0)})
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return out
 
 
 def parse(raw: str) -> dict:
@@ -119,6 +186,7 @@ def parse(raw: str) -> dict:
     out["updated"] = float(data.get("updated") or 0)
     for p in data.get("presets") or []:
         out["presets"].append(normalize_preset(p))
+    out["deleted"] = _tombstones(data)
     return out
 
 
@@ -145,21 +213,35 @@ def import_studio_pool(pool, base: dict | None = None, overwrite: bool = False) 
         else:
             have[p["name"]] = len(store["presets"]); store["presets"].append(p)
         n += 1
+    if n:
+        store["deleted"] = [t for t in store.get("deleted") or [] if t["name"] not in have]
     store["updated"] = time.time() if n else store["updated"]
     store["_imported"] = n
     return store
 
 
 def merge(a: dict, b: dict) -> dict:
-    """Union by name; the newer `updated` wins per preset."""
+    """Union by name; the newer `updated` wins per preset; a tombstone newer than the preset
+    removes it on both sides, a preset newer than the tombstone clears the tombstone."""
     out = empty()
-    by = {}
+    by, tomb = {}, {}
     for src in (a, b):
         for p in src.get("presets") or []:
             cur = by.get(p["name"])
             if cur is None or p.get("updated", 0) > cur.get("updated", 0):
                 by[p["name"]] = p
+        for t in _tombstones(src):
+            if t["name"] not in tomb or t["at"] > tomb[t["name"]]["at"]:
+                tomb[t["name"]] = t
+    for name, t in list(tomb.items()):
+        p = by.get(name)
+        if p is not None:
+            if p.get("updated", 0) > t["at"]:
+                del tomb[name]
+            else:
+                del by[name]
     out["presets"] = sorted(by.values(), key=lambda p: p["name"].lower())
+    out["deleted"] = sorted(tomb.values(), key=lambda t: t["name"].lower())
     out["updated"] = max(float(a.get("updated") or 0), float(b.get("updated") or 0))
     return out
 
@@ -177,6 +259,7 @@ class PresetStore:
         self.loaded_at = 0.0
         self.last_mirror = {"pull": None, "push": None}
         self._mtime = None
+        self._loaded = False
 
     # -- local file --
     def load(self, force: bool = False) -> dict:
@@ -185,7 +268,8 @@ class PresetStore:
                 m = os.path.getmtime(self.path)
             except OSError:
                 m = None
-            if force or m != self._mtime:
+            if force or not self._loaded or m != self._mtime:
+                self._loaded = True
                 if m is None:
                     self.data = empty()
                 else:
@@ -202,6 +286,8 @@ class PresetStore:
         with self.lock:
             data = data if data is not None else self.data
             data["version"] = VERSION
+            cutoff = time.time() - TOMBSTONE_TTL
+            data["deleted"] = [t for t in _tombstones(data) if t["at"] > cutoff]
             os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".presets.", suffix=".json", dir=os.path.dirname(os.path.abspath(self.path)))
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -232,7 +318,9 @@ class PresetStore:
                     self.data["presets"][i] = p
                     break
             else:
+                p["updated"] = time.time()
                 self.data["presets"].append(p)
+            self.data["deleted"] = [t for t in _tombstones(self.data) if t["name"] != p["name"]]
             self.data["presets"].sort(key=lambda x: x["name"].lower())
             self.data["updated"] = time.time()
             self.write()
@@ -244,7 +332,9 @@ class PresetStore:
             n = len(self.data["presets"])
             self.data["presets"] = [p for p in self.data["presets"] if p["name"] != name]
             if len(self.data["presets"]) != n:
-                self.data["updated"] = time.time(); self.write(); return True
+                now = time.time()
+                self.data["deleted"] = [t for t in _tombstones(self.data) if t["name"] != name] + [{"name": name, "at": now}]
+                self.data["updated"] = now; self.write(); return True
             return False
 
     def import_pool(self, pool, overwrite: bool = False) -> int:
@@ -262,33 +352,23 @@ class PresetStore:
         return {"enabled": self.mirror_enabled, "configured": os.path.exists(cfg["key"]), "userhost": cfg["userhost"],
                 "remote": os.path.join(cfg["share"], NAS_REL), "last": self.last_mirror}
 
-    def _nas(self, cmd: str, stdin: bytes | None = None, timeout: int = 40):
-        cfg = self.cfg
-        r = subprocess.run(_ssh_cmd(cfg) + [cfg["userhost"], cmd], input=stdin, capture_output=True, timeout=timeout)
-        return r.returncode, r.stdout, r.stderr.decode(errors="replace").strip()
+    def _mirror_blocked(self) -> str | None:
+        if not self.mirror_enabled:
+            return "mirror disabled"
+        if not os.path.exists(self.cfg["key"]):
+            return f"NAS key {self.cfg['key']} not present"
+        return None
 
     def pull(self) -> dict:
         """Merge the NAS copy into the local file. Locked share / unreachable NAS = no-op with a reason."""
-        res = {"ok": False, "merged": 0, "reason": None, "at": time.time()}
-        if not self.mirror_enabled or not os.path.exists(self.cfg["key"]):
-            res["reason"] = "mirror disabled" if not self.mirror_enabled else f"NAS key {self.cfg['key']} not present"
+        res = {"ok": False, "merged": 0, "reason": self._mirror_blocked(), "at": time.time()}
+        if res["reason"]:
             self.last_mirror["pull"] = res; return res
-        remote = os.path.join(self.cfg["share"], NAS_REL)
-        share = self.cfg["share"]
-        cmd = (f"if ! mount | grep -q {_q(' ' + share + ' type ecryptfs')} && [ ! -d {_q(share)} ]; then echo MMX_LOCKED; exit 0; fi; "
-               f"if [ -f {_q(remote)} ]; then echo MMX_FILE; cat {_q(remote)}; else echo MMX_NOFILE; fi")
-        try:
-            rc, out, err = self._nas(cmd)
-        except subprocess.TimeoutExpired:
-            res["reason"] = "NAS unreachable (timeout)"; self.last_mirror["pull"] = res; return res
-        if rc != 0:
-            res["reason"] = "NAS ssh failed: " + (err.splitlines()[-1] if err else f"rc={rc}"); self.last_mirror["pull"] = res; return res
-        head, _, body = out.partition(b"\n")
-        tag = head.strip().decode(errors="replace")
-        if tag == "MMX_LOCKED":
-            res["reason"] = "share is locked"; self.last_mirror["pull"] = res; return res
-        if tag == "MMX_NOFILE":
+        status, body, reason = nas_pull_file(self.cfg, NAS_REL)
+        if status == "nofile":
             res.update(ok=True, reason="no presets on the NAS yet"); self.last_mirror["pull"] = res; return res
+        if status != "file":
+            res["reason"] = reason; self.last_mirror["pull"] = res; return res
         try:
             remote_data = parse(body.decode("utf-8"))
         except Exception as e:
@@ -297,8 +377,9 @@ class PresetStore:
             local = self.load(force=True)
             before = {p["name"]: p.get("updated") for p in local["presets"]}
             merged = merge(local, remote_data)
-            changed = sum(1 for p in merged["presets"] if before.get(p["name"]) != p.get("updated"))
-            if changed or not os.path.exists(self.path):
+            after = {p["name"]: p.get("updated") for p in merged["presets"]}
+            changed = sum(1 for n in set(before) | set(after) if before.get(n) != after.get(n))
+            if changed or not os.path.exists(self.path) or merged["deleted"] != local.get("deleted", []):
                 self.write(merged)
             res.update(ok=True, merged=changed)
         self.last_mirror["pull"] = res
@@ -306,22 +387,16 @@ class PresetStore:
 
     def push(self) -> dict:
         """Write the merged local file to the NAS (merging with whatever is there first)."""
-        res = {"ok": False, "reason": None, "at": time.time()}
-        if not self.mirror_enabled or not os.path.exists(self.cfg["key"]):
-            res["reason"] = "mirror disabled" if not self.mirror_enabled else f"NAS key {self.cfg['key']} not present"
+        res = {"ok": False, "reason": self._mirror_blocked(), "at": time.time()}
+        if res["reason"]:
             self.last_mirror["push"] = res; return res
         pulled = self.pull()
         if not pulled["ok"]:
             res["reason"] = "pull before push failed: " + str(pulled["reason"]); self.last_mirror["push"] = res; return res
-        remote = os.path.join(self.cfg["share"], NAS_REL)
         payload = json.dumps({k: v for k, v in self.load().items() if not k.startswith("_")}, indent=1, ensure_ascii=False).encode("utf-8")
-        cmd = (f"mkdir -p {_q(os.path.dirname(remote))} && cat > {_q(remote + '.tmp')} && mv -f {_q(remote + '.tmp')} {_q(remote)} && echo MMX_PUSHED")
-        try:
-            rc, out, err = self._nas(cmd, stdin=payload)
-        except subprocess.TimeoutExpired:
-            res["reason"] = "NAS unreachable (timeout)"; self.last_mirror["push"] = res; return res
-        if rc != 0 or b"MMX_PUSHED" not in out:
-            res["reason"] = "NAS write failed: " + (err.splitlines()[-1] if err else f"rc={rc}"); self.last_mirror["push"] = res; return res
+        ok, reason = nas_push_file(self.cfg, NAS_REL, payload)
+        if not ok:
+            res["reason"] = reason; self.last_mirror["push"] = res; return res
         res.update(ok=True, bytes=len(payload))
         self.last_mirror["push"] = res
         return res

@@ -40,6 +40,8 @@ def apply_loras(model, clip, loras: list, scale: float, log=print):
     available = set(folder_paths.get_filename_list("loras"))
     loader = core_nodes.LoraLoader()
     for l in loras:
+        if not S.lora_enabled(l):
+            continue
         name = l["name"]
         if name not in available:
             raise ValueError(f"MMX preset LoRA not found in models/loras: {name}")
@@ -92,14 +94,14 @@ class MMXPreset:
 
 def _describe(p: dict, scale: float = 1.0) -> str:
     lines = [f"{p['name']}"]
-    lines += [f"  {l['name']} @ {float(l.get('strength', S.DEFAULT_STRENGTH)) * scale:.2f}" for l in p["loras"]] or ["  (no LoRAs)"]
+    lines += [f"  {l['name']} @ {float(l.get('strength', S.DEFAULT_STRENGTH)) * scale:.2f}{'' if S.lora_enabled(l) else '  (off)'}" for l in p["loras"]] or ["  (no LoRAs)"]
     if p.get("notes"):
         lines.append("  " + p["notes"])
     return "\n".join(lines)
 
 
 class MMXPresetSave:
-    """Write a preset (name, prompt, up to 3 LoRAs) to the store and mirror it to the NAS."""
+    """Write a preset (name, prompt, up to 5 LoRAs) to the store and mirror it to the NAS."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -110,7 +112,7 @@ class MMXPresetSave:
             "overwrite": ("BOOLEAN", {"default": True}),
             "notes": ("STRING", {"default": ""}),
         }
-        for i in (1, 2, 3):
+        for i in range(1, S.MAX_LORAS + 1):
             req[f"lora_{i}"] = (loras, {"default": NONE})
             req[f"strength_{i}"] = ("FLOAT", {"default": S.DEFAULT_STRENGTH, "min": -2.0, "max": 3.0, "step": 0.05})
         return {"required": req}
@@ -125,8 +127,9 @@ class MMXPresetSave:
     def IS_CHANGED(cls, **kw):
         return float("nan")   # always re-run when queued
 
-    def run(self, name, prompt, overwrite, notes, lora_1, strength_1, lora_2, strength_2, lora_3, strength_3):
-        loras = [{"name": n, "strength": s} for n, s in ((lora_1, strength_1), (lora_2, strength_2), (lora_3, strength_3)) if n and n != NONE]
+    def run(self, name, prompt, overwrite, notes, **kw):
+        pairs = [(kw.get(f"lora_{i}"), kw.get(f"strength_{i}", S.DEFAULT_STRENGTH)) for i in range(1, S.MAX_LORAS + 1)]
+        loras = [{"name": n, "strength": s} for n, s in pairs if n and n != NONE]
         st = S.get_store()
         p = st.save({"name": name, "prompt": prompt, "loras": loras, "notes": notes}, overwrite=overwrite)
         st.push_async()

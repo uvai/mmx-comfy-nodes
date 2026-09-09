@@ -39,7 +39,9 @@ share_dir = NAS + "/volume1/subgenula"
 os.makedirs(share_dir, exist_ok=True)
 if os.environ.get("NAS_LOCKED") == "1":
     print("MMX_LOCKED"); sys.exit(0)
-remote = share_dir + "/mmx/presets.json"
+import re
+m = re.search(r"/volume1/subgenula/(mmx/[a-z]+\\.json)", cmd)
+remote = NAS + "/volume1/subgenula/" + (m.group(1) if m else "mmx/presets.json")
 if "cat >" in cmd:                         # push
     os.makedirs(os.path.dirname(remote), exist_ok=True)
     open(remote + ".tmp", "wb").write(sys.stdin.buffer.read()); os.replace(remote + ".tmp", remote); print("MMX_PUSHED"); sys.exit(0)
@@ -52,6 +54,7 @@ os.environ["PATH"] = SHIM + os.pathsep + os.environ["PATH"]
 os.environ["MMX_NAS_PROXY"] = "none"
 os.environ["MMX_NAS_KEY"] = os.path.abspath(__file__)          # any existing file = "configured"
 os.environ["MMX_PRESETS"] = os.path.join(TMP, "presets.json")
+os.environ["MMX_PHRASES"] = os.path.join(TMP, "phrases.json")
 os.environ["MMX_NAS_SHARE"] = "/volume1/subgenula"
 os.environ["MMX_LIBRARY"] = os.path.join(TMP, "library")
 os.environ["MMX_LIBRARY_THUMBS"] = os.path.join(TMP, "library_thumbs")
@@ -80,9 +83,12 @@ def main():
     except store.PresetError as e:
         check("overwrite=False refuses an existing name", "exists" in str(e))
     try:
-        st.save({"name": "bad", "loras": [{"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}]}); check("max 3 loras", False)
+        st.save({"name": "bad", "loras": [{"name": c} for c in "abcdef"]}); check("max 5 loras", False)
     except store.PresetError:
-        check("max 3 loras", True)
+        check("max 5 loras", True)
+    p5 = st.save({"name": "five", "prompt": "x", "loras": [{"name": f"l{i}.safetensors", "strength": 0.5, "on": i != 3} for i in range(1, 6)]})
+    check("5 lora rows kept; on=false stored only where set", len(p5["loras"]) == 5 and p5["loras"][2].get("on") is False and "on" not in p5["loras"][0], str(p5["loras"]))
+    st.delete("five")
 
     # studio pool import (both shapes)
     pool = [{"id": "p1", "name": "establishing", "text": "<Subject 1> wide shot", "loras": [{"name": LORAS[1], "strength": 0.5}]},
@@ -115,7 +121,7 @@ def main():
 
     # MMXPresetSave node
     sv = nodes.MMXPresetSave()
-    r = sv.run("close up", "<Subject 1> turns", True, "", LORAS[0], 0.6, NONE, 0.85, LORAS[2], 1.0)
+    r = sv.run("close up", "<Subject 1> turns", True, "", lora_1=LORAS[0], strength_1=0.6, lora_2=NONE, strength_2=0.85, lora_3=LORAS[2], strength_3=1.0, lora_4=NONE, strength_4=0.85, lora_5=NONE, strength_5=0.85)
     check("MMXPresetSave writes the preset (none slots skipped) and reports", r["result"] == ("close up",) and st.get("close up")["loras"] == [{"name": LORAS[0], "strength": 0.6}, {"name": LORAS[2], "strength": 1.0}] and "saved preset" in r["ui"]["text"][0])
     time.sleep(0.5)   # push_async
     nas_file = os.path.join(TMP, "nas/volume1/subgenula/mmx/presets.json")
@@ -146,6 +152,74 @@ def main():
     b = {"presets": [{"name": "x", "prompt": "new", "updated": 2}]}
     mg = store.merge(store.parse(json.dumps(a)), store.parse(json.dumps(b)))
     check("merge: union by name, newer updated wins", [p["prompt"] for p in mg["presets"]] == ["new", "only-a"])
+
+    # delete survives the mirror: tombstone beats the NAS copy on the pull-before-push
+    st.save({"name": "doomed", "prompt": "x"}); st.push()
+    nas_names = lambda: [p["name"] for p in json.load(open(nas_file))["presets"]]
+    check("preset pushed to the NAS before the delete", "doomed" in nas_names())
+    time.sleep(0.01); st.delete("doomed"); res = st.push()
+    check("delete + push: the preset stays deleted locally AND on the NAS (tombstone)", res["ok"] and "doomed" not in st.names() and "doomed" not in nas_names()
+          and any(t["name"] == "doomed" for t in json.load(open(nas_file))["deleted"]), f"{res} local={st.names()} nas={nas_names()}")
+    time.sleep(0.01); st.save({"name": "doomed", "prompt": "back"}); st.push()
+    check("re-saving after a delete clears the tombstone on both sides", "doomed" in st.names() and "doomed" in nas_names() and not any(t["name"] == "doomed" for t in json.load(open(nas_file))["deleted"]) and not any(t["name"] == "doomed" for t in st.data["deleted"]))
+    st.delete("doomed"); st.push()
+    # a lora row with on=false is skipped by apply_loras
+    st.save({"name": "halfoff", "prompt": "x", "loras": [{"name": LORAS[0], "strength": 0.5, "on": False}, {"name": LORAS[2], "strength": 0.4}]})
+    out = nodes.MMXPreset().run([], [], "halfoff", 1.0)
+    check("MMXPreset skips lora rows with on=false", out["result"][0] == [(LORAS[2], 0.4)], str(out["result"][0]))
+
+    # phrases store: seed, add / delete, bulk replace, mirror round trip with tombstones
+    phrases = importlib.import_module("mmx_presets.phrases")
+    ph = phrases.get_store()
+    g = ph.groups()
+    check("phrases seeded on first load (First frame / Camera / Lighting / Pacing)", [x["name"] for x in g] == ["First frame", "Camera", "Lighting", "Pacing"]
+          and g[0]["phrases"][0]["text"] == "…is the absolute first frame of the video." and os.path.isfile(ph.path), str([x["name"] for x in g]))
+    ph.add("Camera", "slow dolly left"); ph.push()
+    nas_ph = os.path.join(TMP, "nas/volume1/subgenula/mmx/phrases.json")
+    check("phrase add + push mirrors phrases.json to the NAS", os.path.isfile(nas_ph) and any(p["text"] == "slow dolly left" for gg in json.load(open(nas_ph))["groups"] for p in gg["phrases"]))
+    time.sleep(0.01); ph.remove("Camera", "slow dolly left"); ph.push()
+    check("phrase delete survives the pull-before-push (tombstone)", not any(p["text"] == "slow dolly left" for gg in ph.groups() for p in gg["phrases"])
+          and not any(p["text"] == "slow dolly left" for gg in json.load(open(nas_ph))["groups"] for p in gg["phrases"]))
+    ph.replace_all([{"name": "Camera", "phrases": ["Wide shot, slow push in", "crash zoom"]}, {"name": "Mood", "phrases": [{"text": "tense"}]}])
+    keys = {(gg["name"], p["text"]) for gg in ph.groups() for p in gg["phrases"]}
+    check("bulk replace: kept, added and removed phrases; removed ones tombstoned", ("Camera", "crash zoom") in keys and ("Mood", "tense") in keys and ("Camera", "close up") not in keys
+          and ("Lighting", "film grain") not in keys and any(t["text"] == "film grain" for t in ph.data["deleted"]), str(sorted(keys)))
+    ph.push(); os.remove(ph.path); ph2 = phrases.PhraseStore(path=ph.path); ph2.load()
+    check("local phrases.json gone -> reseeded", any(p["text"] == "film grain" for gg in ph2.groups() for p in gg["phrases"]))
+    res = ph2.pull()
+    keys2 = {(gg["name"], p["text"]) for gg in ph2.groups() for p in gg["phrases"]}
+    check("re-mirror from the NAS restores the edited set (seed entries deleted before stay deleted)", res["ok"] and ("Camera", "crash zoom") in keys2 and ("Lighting", "film grain") not in keys2, f"{res} {sorted(keys2)}")
+
+    # LoRA stack: rows applied in order, off / none / zero rows skipped, VALIDATE names missing files
+    ls = importlib.import_module("mmx_presets.lora_stack")
+    kw = {}
+    for i in range(1, 6):
+        kw[f"on_{i}"] = True; kw[f"lora_{i}"] = ls.NONE; kw[f"strength_{i}"] = 1.0
+    kw.update(lora_1=LORAS[1], strength_1=0.5, lora_2=LORAS[0], strength_2=0.7, on_2=False, lora_3=LORAS[2], strength_3=0.0, lora_5=LORAS[0], strength_5=1.2)
+    out = ls.MMXLoRAStack().run([], [], **kw)
+    check("MMXLoRAStack applies enabled non-zero rows in order to model and clip", out["result"][0] == [(LORAS[1], 0.5), (LORAS[0], 1.2)] and out["result"][1] == [(LORAS[1], 0.5), (LORAS[0], 1.2)], str(out["result"][:2]))
+    check("stack text lists the effective rows", out["result"][2].startswith("1. " + LORAS[1]) and "2. " + LORAS[0] + " @ 1.20" in out["result"][2], out["result"][2])
+    check("stack VALIDATE_INPUTS names a missing file, accepts the rest", ls.MMXLoRAStack.VALIDATE_INPUTS(**kw) is True and "ghost.safetensors" in str(ls.MMXLoRAStack.VALIDATE_INPUTS(**{**kw, "lora_1": "ghost.safetensors"})))
+    check("stack INPUT_TYPES: 5 x (on, lora, strength) after model/clip", list(ls.MMXLoRAStack.INPUT_TYPES()["required"])[:5] == ["model", "clip", "on_1", "lora_1", "strength_1"] and len(ls.MMXLoRAStack.INPUT_TYPES()["required"]) == 17)
+
+    # Deck node: passthrough, never touches the store
+    deck = importlib.import_module("mmx_presets.deck")
+    n_before = len(st.names())
+    out = deck.MMXDeck().run("<Picture 1> walks", "walk", json.dumps([{"name": LORAS[0], "strength": 0.6, "on": True}]), "{}")
+    check("MMXDeck run is a passthrough (prompt out, store untouched)", out["result"][0] == "<Picture 1> walks" and len(st.names()) == n_before and "1 LoRA row" in out["ui"]["text"][0], str(out))
+
+    # References Manager subclass (only when the RefPack is importable)
+    mgr = importlib.import_module("mmx_presets.manager")
+    if mgr._BASE is not None:
+        cls = mgr.NODE_CLASS_MAPPINGS["MMXReferencesManager"]
+        check("MMXReferencesManager: same inputs and 20 outputs as the RefPack node", cls.INPUT_TYPES() == mgr._BASE.INPUT_TYPES() and len(cls.RETURN_TYPES) == 20 and cls.RETURN_NAMES == mgr._BASE.RETURN_NAMES)
+        os.environ["OPENROUTER_KEY"] = "sk-test-fallback"; os.environ.pop("OPENROUTER_API_KEY", None); os.environ.pop("LLM_KEY", None)
+        check("key fallback: blank -> OPENROUTER_KEY; explicit wins", mgr.resolve_key("") == "sk-test-fallback" and mgr.resolve_key(" sk-x ") == "sk-x")
+        os.environ.pop("OPENROUTER_KEY")
+        out = cls().build(direction="hello", references_json="", prompt_provider="none")
+        check("manager subclass builds (provider none): prompt passthrough, 20 outputs", len(out) == 20 and out[18] == "hello", str(out[18:]))
+    else:
+        print(f"skip References Manager checks ({mgr._REASON})")
 
     # chain helpers (numpy/torch/PIL needed only here)
     try:
@@ -202,12 +276,18 @@ def main():
         check("psnr: identical = 100 cap, tiny noise ~34 dB, ssim ordering", chk.psnr(a[0], a[0]) == 100.0 and 30 < chk.psnr(a[0], noise.clamp(0, 1)[0]) < 40 and chk.ssim(a[0], a[0]) > 0.999 and chk.ssim(a[0], noise.clamp(0, 1)[0]) < chk.ssim(a[0], a[0]))
         node = chk.MMXFirstFrameCheck()
         frames = torch.cat([a, a * 0.5])
-        r_ok = node.run(frames, a, 24.0)
-        r_bad = node.run(frames, torch.rand((1, 64, 96, 3)), 24.0)
+        r_ok = node.run(frames, 24.0, reference=a)
+        r_bad = node.run(frames, 24.0, reference=torch.rand((1, 64, 96, 3)))
         # the same image comes back > 50 dB, not 100: the guide geometry re-samples through 8-bit lanczos like AddGuide
         check("FirstFrameCheck: same image passes (> 50 dB, passed True), random fails; strip is reference|frame|diff wide",
               r_ok["result"][2] is True and r_ok["result"][0] > 50 and r_bad["result"][2] is False and r_bad["result"][0] < 24 and tuple(r_ok["result"][3].shape) == (1, 64, 96 * 3 + 12, 3), f"{r_ok['result'][:3]} {r_bad['result'][:3]}")
         check("FirstFrameCheck ui: text PASS/FAIL + preview image in temp", r_ok["ui"]["text"][0].startswith("PASS") and r_bad["ui"]["text"][0].startswith("FAIL") and r_ok["ui"]["passed"] == [True] and os.path.isfile(os.path.join(fp.get_temp_directory(), r_ok["ui"]["images"][0]["filename"])))
+        r_skip = node.run(frames, 24.0, reference=None, enabled=True)
+        r_off = node.run(frames, 24.0, reference=a, enabled=False)
+        check("FirstFrameCheck skips with no reference / disabled: passed=True, psnr=-1, comparison=frame 0, body says skipped (first segment)",
+              r_skip["result"][:3] == (-1.0, -1.0, True) and torch.equal(r_skip["result"][3], frames[0:1]) and r_skip["ui"]["text"][0].startswith("skipped (first segment)")
+              and r_off["result"][:3] == (-1.0, -1.0, True) and "check disabled" in r_off["ui"]["text"][0] and r_skip["ui"]["skipped"] == [True], str(r_skip["ui"]["text"]))
+        check("FirstFrameCheck INPUT_TYPES: reference optional, enabled toggle", "reference" in chk.MMXFirstFrameCheck.INPUT_TYPES()["optional"] and "enabled" in chk.MMXFirstFrameCheck.INPUT_TYPES()["optional"])
         gate = chk.MMXChainGate()
         good, rejected = chk.gate_paths("gate_test")
         r = gate.run(frames, True, "gate_test")
@@ -231,6 +311,9 @@ def main():
         check("MMXLibraryImage: image tensor, flat input filename, library path; file copied into input/",
               tuple(img.shape) == (1, 48, 64, 3) and float(img[0, 0, 0, 0]) > 0.99 and name == "Subjects__j__red.png" and os.path.isfile(os.path.join(fp.get_input_directory(), name)) and path == os.path.join(L, "Subjects/j/red.png"), str(out["result"][1:]))
         check("thumb jpeg", lib.thumb_jpeg("Subjects/j/red.png", 32)[:2] == b"\xff\xd8")
+        inj = lib.inject_file("Subjects/j/red.png", fp.get_input_directory(), "Picture 2")
+        check("inject_file: image copied into input/, kind image, slot echoed", inj["filename"] == "Subjects__j__red.png" and inj["kind"] == "image" and inj["frame_png"] is None and inj["slot"] == "Picture 2", str(inj))
+        check("library slot widget lists (none) + Picture 1-9 + Video 1-3 + Audio 1", lib.SLOTS == ["(none)"] + [f"Picture {i}" for i in range(1, 10)] + [f"Video {i}" for i in range(1, 4)] + ["Audio 1"] and lib.MMXLibraryImage.INPUT_TYPES()["optional"]["slot"][0] == lib.SLOTS)
         if shutil.which("ffmpeg"):
             vp = os.path.join(L, "VideoRef", "blue.mp4")
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x48:d=0.5:r=24", "-pix_fmt", "yuv420p", vp], check=True)
@@ -240,6 +323,9 @@ def main():
             check("MMXLibraryImage mp4: first frame as IMAGE (blue), the mp4 itself copied into input/",
                   tuple(img.shape) == (1, 48, 64, 3) and float(img[0, 24, 32, 2]) > 0.8 and float(img[0, 24, 32, 0]) < 0.2 and name == "VideoRef__blue.mp4" and os.path.isfile(os.path.join(fp.get_input_directory(), name)) and "first frame" in out["ui"]["text"][0], str(out))
             check("video thumb jpeg", lib.thumb_jpeg("VideoRef/blue.mp4", 32)[:2] == b"\xff\xd8")
+            inj = lib.inject_file("VideoRef/blue.mp4", fp.get_input_directory(), "Picture 1")
+            check("inject_file mp4: the mp4 copied AND its first frame written as __frame0.png for a Picture slot",
+                  inj["kind"] == "video" and inj["frame_png"] == "VideoRef__blue__frame0.png" and os.path.isfile(os.path.join(fp.get_input_directory(), inj["frame_png"])), str(inj))
         else:
             print("skip mp4 library checks (no ffmpeg)")
         # sync trigger: script absent -> clean error; present -> runs detached and the log fills

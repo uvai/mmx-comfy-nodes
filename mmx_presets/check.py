@@ -172,15 +172,19 @@ def _save_preview(image: torch.Tensor, prefix: str) -> list:
 class MMXFirstFrameCheck:
     """Compare frame 0 of `images` with `reference` in the guide's geometry (cover-crop + lanczos to the
     frame's size, exactly like MiniMaxH3AddGuide). Outputs PSNR, SSIM, passed and a labelled
-    reference | frame 0 | abs-diff strip; shows the numbers and PASS/FAIL in the node."""
+    reference | frame 0 | abs-diff strip; shows the numbers and PASS/FAIL in the node. With `enabled`
+    off or no reference connected it skips: passed=True, psnr=ssim=-1, comparison=frame 0."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
             "images": ("IMAGE", {"tooltip": "decoded frames (VAE Decode); frame 0 is checked"}),
-            "reference": ("IMAGE", {"tooltip": "the intended first frame: the slot-9 image or the previous segment's last frame"}),
             "threshold_db": ("FLOAT", {"default": 24.0, "min": 0.0, "max": 100.0, "step": 0.5,
                                        "tooltip": "PSNR at or above this passes. Guide continuations measure ~29-33 dB, a wrong reference < 20 dB."}),
+        }, "optional": {
+            "reference": ("IMAGE", {"tooltip": "the intended first frame: the slot-9 image or the previous segment's last frame. Leave unconnected on a first segment: the check is skipped."}),
+            "enabled": ("BOOLEAN", {"default": True, "label_on": "enabled", "label_off": "skipped",
+                                    "tooltip": "off: no comparison, passed=True, psnr=-1, comparison=frame 0 (first segment of a chain)"}),
         }}
 
     RETURN_TYPES = ("FLOAT", "FLOAT", "BOOLEAN", "IMAGE")
@@ -190,9 +194,17 @@ class MMXFirstFrameCheck:
     CATEGORY = "mmx/chain"
     DESCRIPTION = "PSNR / SSIM of frame 0 against the intended first frame, measured in MiniMaxH3AddGuide's cover-crop geometry."
 
-    def run(self, images, reference, threshold_db):
+    SKIP_TEXT = "skipped (first segment)"
+
+    def run(self, images, threshold_db, reference=None, enabled=True):
         frame = images[0:1]
         h, w = int(frame.shape[1]), int(frame.shape[2])
+        if not enabled or reference is None:
+            why = "check disabled" if not enabled else "no reference connected"
+            text = f"{self.SKIP_TEXT}: {why}\nframe 0 {w}x{h} of {int(images.shape[0])} passed through; passed=True psnr=-1"
+            print("[mmx-check] " + text.replace("\n", " | "))
+            return {"ui": {"text": [text], "images": _save_preview(frame, "mmx_check"), "psnr": [-1.0], "ssim": [-1.0], "passed": [True], "skipped": [True]},
+                    "result": (-1.0, -1.0, True, frame)}
         rh, rw = int(reference.shape[1]), int(reference.shape[2])
         ref = guide_geometry(reference[0:1], w, h)
         p = psnr(ref[0], frame[0]); s = ssim(ref[0], frame[0]); ok = p >= float(threshold_db)
@@ -202,7 +214,7 @@ class MMXFirstFrameCheck:
         text = (f"{'PASS' if ok else 'FAIL'}  PSNR {p:.2f} dB  (threshold {float(threshold_db):g})  SSIM {s:.3f}\n"
                 f"frame 0 {w}x{h} of {int(images.shape[0])} | reference {rw}x{rh}: {crop_txt}")
         print("[mmx-check] " + text.replace("\n", " | "))
-        return {"ui": {"text": [text], "images": _save_preview(strip, "mmx_check"), "psnr": [p], "ssim": [s], "passed": [ok]},
+        return {"ui": {"text": [text], "images": _save_preview(strip, "mmx_check"), "psnr": [p], "ssim": [s], "passed": [ok], "skipped": [False]},
                 "result": (p, s, ok, strip)}
 
 

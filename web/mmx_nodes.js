@@ -1,11 +1,14 @@
 // mmx-comfy-nodes web extension, part 2: execution results shown in the node body (First Frame
-// Check numbers + PASS/FAIL, Chain Gate path, Library copy, References map) and the MMX Library
-// Image node UI (search box filtering the dropdown, thumbnail preview, Refresh / Mirror from NAS).
+// Check numbers + PASS/FAIL/skipped, Chain Gate path, Library copy, References map, LoRA stack),
+// the MMX Library Image node UI (search box filtering the dropdown, thumbnail preview, Refresh /
+// Mirror from NAS, Inject / Clear slot / Inject all into the References Manager) and the MMX LoRA
+// Stack body (live summary of the effective rows + Refresh LoRAs).
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
+import * as M from "./mmx_api.js";
 
-const RESULT_NODES = ["MMXFirstFrameCheck", "MMXChainGate", "MMXLibraryImage", "MMXReferencesBuilder", "MMXSaveFrame"];
+const RESULT_NODES = ["MMXFirstFrameCheck", "MMXChainGate", "MMXLibraryImage", "MMXReferencesBuilder", "MMXSaveFrame", "MMXLoRAStack"];
 const LIB_NONE = "(library empty — press Refresh / Mirror from NAS)";
 const COLORS = { pass: { color: "#1f4d2b", bgcolor: "#27603a" }, fail: { color: "#5a1f1f", bgcolor: "#7a2a2a" } };
 let lib = { paths: [], items: {}, root: "", loaded: false };
@@ -30,7 +33,84 @@ function showResult(node, text, verdict) {
   w.value = text || "";
   if (verdict === true) { node.color = COLORS.pass.color; node.bgcolor = COLORS.pass.bgcolor; }
   else if (verdict === false) { node.color = COLORS.fail.color; node.bgcolor = COLORS.fail.bgcolor; }
+  else if (verdict === "skip") { node.color = "#3a3a2a"; node.bgcolor = "#4a4a38"; }
   node.setDirtyCanvas(true, true);
+}
+
+// ── LoRA stack ───────────────────────────────────────────────────────────────
+function setupStackNode(node) {
+  const summary = () => showResult(node, M.describeStack(M.getStack(node)));
+  node.mmxRefreshSummary = summary;
+  for (const w of node.widgets || []) {
+    if (/^(on|lora|strength)_\d$/.test(w.name)) { const orig = w.callback; w.callback = function (...a) { const r = orig?.apply(this, a); summary(); return r; }; }
+  }
+  const btn = node.addWidget("button", "↻ Refresh LoRAs", null, async () => {
+    btn.name = "refreshing…"; node.setDirtyCanvas(true, true);
+    try {
+      const d = await (await api.fetchApi("/mmx/loras?refresh=1")).json();
+      const values = [M.NONE, ...(d.loras || [])];
+      for (const w of node.widgets.filter(w => /^lora_\d$/.test(w.name))) { w.options.values = values.includes(w.value) ? values : [...values, w.value]; }
+      btn.name = `↻ Refresh LoRAs (${(d.loras || []).length})`;
+    } catch (e) { btn.name = "↻ Refresh LoRAs (failed: " + (e?.message || e) + ")"; }
+    setTimeout(() => { btn.name = "↻ Refresh LoRAs"; node.setDirtyCanvas(true, true); }, 4000);
+    node.setDirtyCanvas(true, true);
+  });
+  btn.serialize = false; btn.options = { ...(btn.options || {}), serialize: false };
+  const origConfigure = node.onConfigure;
+  node.onConfigure = function (...a) { const r = origConfigure?.apply(this, a); summary(); return r; };
+  summary();
+  node.setSize([Math.max(node.size[0], 460), node.computeSize()[1]]);
+}
+
+// ── library inject ───────────────────────────────────────────────────────────
+function groupOf(node) {
+  const groups = app.graph._groups || app.graph.groups || [];
+  const [x, y] = node.pos;
+  return groups.find(g => { const b = g._bounding || g.bounding; return b && x >= b[0] && y >= b[1] && x <= b[0] + b[2] && y <= b[1] + b[3]; }) || null;
+}
+function librariesInGroup(node) {
+  const g = groupOf(node);
+  const libs = M.findLibraries();
+  if (!g) return { group: null, libs };
+  const b = g._bounding || g.bounding;
+  return { group: g, libs: libs.filter(n => n.pos[0] >= b[0] && n.pos[1] >= b[1] && n.pos[0] <= b[0] + b[2] && n.pos[1] <= b[1] + b[3]) };
+}
+const slotOrder = s => { const p = M.parseSlot(s); return p ? ({ image: 0, video: 100, audio: 200 })[p.kind] + p.index : 999; };
+
+async function injectOne(node) {
+  const mgr = M.defaultManager();
+  const res = await M.injectLibrary(node, mgr);
+  M.highlight(mgr);
+  const note = res.shifted ? ` (asked for ${res.requested}; the list had fewer entries, so it is ${res.tag})` : "";
+  return `${res.replaced ? "replaced" : "added"} ${res.tag} = ${res.file}${res.firstFrame ? " (first frame of " + res.source + ")" : ""} in ${M.label(mgr)}${note}`;
+}
+function setupInjectButtons(node) {
+  const inject = node.addWidget("button", "⇢ Inject into Manager", null, async () => {
+    inject.name = "injecting…"; node.setDirtyCanvas(true, true);
+    try { const t = await injectOne(node); showResult(node, t); inject.name = "⇢ Inject into Manager (done)"; }
+    catch (e) { showResult(node, "inject failed: " + (e?.message || e)); inject.name = "⇢ Inject into Manager (failed)"; }
+    setTimeout(() => { inject.name = "⇢ Inject into Manager"; node.setDirtyCanvas(true, true); }, 4000);
+    node.setDirtyCanvas(true, true);
+  });
+  const clear = node.addWidget("button", "✕ Clear slot", null, () => {
+    try {
+      const mgr = M.defaultManager(); const slot = node.widgets.find(w => w.name === "slot")?.value;
+      if (!mgr) throw new Error("no References Manager in the graph");
+      const r = M.clearReferenceSlot(mgr, slot); M.highlight(mgr);
+      showResult(node, r.removed ? `cleared ${r.requested} (${r.removed}) in ${M.label(mgr)}; later entries move up` : `${r.requested} is already empty in ${M.label(mgr)}`);
+    } catch (e) { showResult(node, "clear failed: " + (e?.message || e)); }
+  });
+  const all = node.addWidget("button", "⇢ Inject all (group)", null, async () => {
+    all.name = "injecting…"; node.setDirtyCanvas(true, true);
+    const { group, libs } = librariesInGroup(node);
+    const todo = libs.filter(n => { const s = n.widgets.find(w => w.name === "slot")?.value; return s && s !== M.NONE; }).sort((a, b) => slotOrder(a.widgets.find(w => w.name === "slot").value) - slotOrder(b.widgets.find(w => w.name === "slot").value));
+    const lines = [group ? `group "${group.title}": ${todo.length} library node(s) with a slot` : `no group around this node: ${todo.length} library node(s) with a slot in the graph`];
+    for (const n of todo) {
+      try { lines.push("✓ " + await injectOne(n)); } catch (e) { lines.push(`✗ ${M.label(n)}: ${e?.message || e}`); }
+    }
+    showResult(node, lines.join("\n")); all.name = "⇢ Inject all (group)"; node.setDirtyCanvas(true, true);
+  });
+  for (const b of [inject, clear, all]) { b.serialize = false; b.options = { ...(b.options || {}), serialize: false }; }
 }
 
 // ── library ──────────────────────────────────────────────────────────────────
@@ -118,6 +198,7 @@ function setupLibraryNode(node) {
     const orig = fw.callback;
     fw.callback = function (...args) { const r = orig?.apply(this, args); loadThumb(node); return r; };
   }
+  setupInjectButtons(node);
   const origConfigure = node.onConfigure;
   node.onConfigure = function (...args) { const r = origConfigure?.apply(this, args); if (lib.loaded) applyFilter(node); loadThumb(node); return r; };
   const paint = () => { applyFilter(node); loadThumb(node); };
@@ -144,7 +225,7 @@ app.registerExtension({
       origExecuted?.apply(this, arguments);
       const text = Array.isArray(message?.text) ? message.text.join("\n") : (message?.text || "");
       let verdict;
-      if (nodeData.name === "MMXFirstFrameCheck" && Array.isArray(message?.passed)) verdict = !!message.passed[0];
+      if (nodeData.name === "MMXFirstFrameCheck" && Array.isArray(message?.passed)) verdict = message?.skipped?.[0] ? "skip" : !!message.passed[0];
       if (nodeData.name === "MMXChainGate") verdict = true;   // a failed gate raises instead of reporting
       showResult(this, text, verdict);
     };
@@ -153,5 +234,6 @@ app.registerExtension({
     if (!RESULT_NODES.includes(node.comfyClass)) return;
     resultWidget(node);
     if (node.comfyClass === "MMXLibraryImage") setupLibraryNode(node);
+    if (node.comfyClass === "MMXLoRAStack") setupStackNode(node);
   },
 });

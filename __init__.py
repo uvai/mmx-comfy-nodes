@@ -1,4 +1,4 @@
-"""mmx-comfy-nodes — MMX preset / sequence / chain / library nodes for ComfyUI.
+"""mmx-comfy-nodes — MMX preset / sequence / chain / library / deck nodes for ComfyUI.
 
 Preset store: /workspace/mmx/presets.json (MMX_PRESETS overrides), mirrored from and to the NAS
 share (mmx/presets.json) over the instance's existing NAS ssh path. On load: pull the NAS copy
@@ -9,8 +9,9 @@ import os, threading
 from .mmx_presets import store as _store
 from .mmx_presets.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 from .mmx_presets import check as _check, library as _library, references as _references
+from .mmx_presets import lora_stack as _lora_stack, deck as _deck, manager as _manager, phrases as _phrases
 
-for _m in (_check, _library, _references):
+for _m in (_check, _library, _references, _lora_stack, _deck, _manager):
     NODE_CLASS_MAPPINGS.update(_m.NODE_CLASS_MAPPINGS)
     NODE_DISPLAY_NAME_MAPPINGS.update(_m.NODE_DISPLAY_NAME_MAPPINGS)
 
@@ -28,17 +29,22 @@ if not os.environ.get("OPENROUTER_API_KEY"):
 
 _st = _store.get_store()
 _st.load()
+_ph = _phrases.get_store()
+_ph.load()
+if _manager._BASE is None:
+    print(f"[mmx-presets] MMX References Manager not registered: {_manager._REASON}")
 print(f"[mmx-presets] library root {_library.root()} ({len(_library.scan())} file(s))")
-print(f"[mmx-presets] store {_st.path}: {len(_st.data['presets'])} preset(s) local; NAS mirror "
+print(f"[mmx-presets] store {_st.path}: {len(_st.data['presets'])} preset(s) local; phrases {_ph.path}: "
+      f"{sum(len(g['phrases']) for g in _ph.data['groups'])} in {len(_ph.data['groups'])} group(s); NAS mirror "
       f"{'on (' + _st.cfg['userhost'] + ')' if _st.mirror_enabled and _st.nas_status()['configured'] else 'off'}")
 
 
 def _initial_pull():
-    try:
-        res = _st.pull()
-        print(f"[mmx-presets] initial NAS pull: {res}")
-    except Exception as e:
-        print(f"[mmx-presets] initial NAS pull failed: {e}")
+    for name, store in (("presets", _st), ("phrases", _ph)):
+        try:
+            print(f"[mmx-presets] initial NAS pull ({name}): {store.pull()}")
+        except Exception as e:
+            print(f"[mmx-presets] initial NAS pull ({name}) failed: {e}")
 
 
 # ComfyUI imports custom nodes before the server listens; the pull can take seconds, so it

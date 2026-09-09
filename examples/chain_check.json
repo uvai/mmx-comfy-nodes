@@ -1437,7 +1437,7 @@
    ],
    "size": [
     360,
-    144
+    168
    ],
    "flags": {},
    "order": 0,
@@ -1469,7 +1469,8 @@
     "Node name for S&R": "MMXLibraryImage"
    },
    "widgets_values": [
-    "Subjects/j/identity.png"
+    "Subjects/j/identity.png",
+    "(none)"
    ],
    "title": "MMX Library Image \u2014 identity (<Picture 1>)"
   },
@@ -1482,7 +1483,7 @@
    ],
    "size": [
     360,
-    144
+    168
    ],
    "flags": {},
    "order": 0,
@@ -1516,7 +1517,8 @@
     "Node name for S&R": "MMXLibraryImage"
    },
    "widgets_values": [
-    "Sets/room/first_frame.png"
+    "Sets/room/first_frame.png",
+    "(none)"
    ],
    "title": "MMX Library Image \u2014 first frame (slot 9)"
   },
@@ -1652,7 +1654,7 @@
    ],
    "size": [
     360,
-    192
+    216
    ],
    "flags": {},
    "order": 9,
@@ -1701,7 +1703,8 @@
     "Node name for S&R": "MMXFirstFrameCheck"
    },
    "widgets_values": [
-    24.0
+    24.0,
+    true
    ],
    "title": "MMX First Frame Check"
   },

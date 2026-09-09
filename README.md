@@ -2,6 +2,9 @@
 
 ComfyUI custom nodes that move prompt + LoRA preset selection into the canvas, backed by one
 preset store shared with the mmx runner and mirrored to the NAS so presets survive a re-rent.
+0.3 adds the **deck** build for the daily graph: MMX Deck (prompt constructor + preset manager),
+MMX LoRA Stack, Library → References Manager injection, an MMX References Manager drop-in, and a
+skippable First Frame Check — see "The deck build" below and `examples/deck.json`.
 
 Installed by `additional_params.sh` in `uvai/base-image` next to `ComfyUI-MiniMaxRefPack`
 (`git clone https://github.com/uvai/mmx-comfy-nodes` into `custom_nodes`). Manual install:
@@ -18,9 +21,17 @@ does not exist):
 ```json
 {"version": 1, "updated": 1788600000.0,
  "presets": [{"name": "walk", "prompt": "<Picture 1> walks toward <Picture 9>.",
-              "loras": [{"name": "H3_Motion_BoosterV2.safetensors", "strength": 0.7}],
-              "notes": "", "created": 1788600000.0, "updated": 1788600000.0}]}
+              "loras": [{"name": "H3_Motion_BoosterV2.safetensors", "strength": 0.7},
+                        {"name": "MiniMax-H3-Ref2VA-Acc-8Step.safetensors", "strength": 0.5, "on": false}],
+              "notes": "", "created": 1788600000.0, "updated": 1788600000.0}],
+ "deleted": [{"name": "old preset", "at": 1788500000.0}]}
 ```
+
+Up to **5** LoRA rows per preset (0.3; was 3). A row may carry `"on": false` (the Deck's
+on/off switch): MMX Preset / Sequence and the runner skip it, the Deck's Load restores it as an
+off row. `deleted` holds tombstones: a delete used to be undone by the mirror's pull-before-push
+(the NAS copy still had the preset); now a tombstone newer than the preset wins on both sides,
+and a preset saved after the tombstone clears it. Older readers ignore both additions.
 
 **NAS mirror.** On load the pack pulls `/volume1/subgenula/mmx/presets.json` from the pyramid
 share over the instance's existing NAS ssh path (`/root/.ssh/mmx_nas_key`, `NAS_DEST` from the
@@ -41,18 +52,100 @@ python3 tools/import_studio_pool.py pool.json --server http://127.0.0.1:8188 --o
 Pool items become presets (`text` → `prompt`, `loras` carried over); existing names are kept
 unless `--overwrite`.
 
+## The deck build (0.3)
+
+`examples/deck.json` is the user's daily graph (`base_v10_check.json` = v10 + First Frame Check)
+with exactly these changes, made by `tools/build_deck.py`: the **Power Lora Loader (rgthree) #137
+is replaced by MMX LoRA Stack #137** (same links: model from ModelPreviewOverrideKJ, clip from
+CLIPLoader, MODEL out into the turbo LoRA #158, which is untouched), **MMX Deck #400** is added
+unwired, **MMX Library Image #401 / #402** (slots Picture 1 / Picture 9) are added unwired, and
+**MMX First Frame Check #301** gets its `enabled` toggle. No chaining automation is in the graph.
+
+**MMX Deck** — one DOM panel; its state (prompt, preset name, the five LoRA rows, the chosen
+target nodes) lives in four hidden widgets, so it rides in `widgets_values`.
+
+- *Tag buttons* insert `<Picture 1..9>`, `<Subject 1..3>`, `<Video 1..3>`, `<Audio 1>` at the
+  caret. Picture / Video / Audio buttons are enabled only for slots the target References
+  Manager currently holds (read from its `references_json`, tags assigned by the RefPack's rule),
+  so the numbering always matches what the model will see; the line under them says which
+  Manager and how many of each. Subject buttons are always on.
+- *Phrase chips*, grouped, user-editable (`+ phrase`, `✎ edit` → ✕ on each chip). Stored in
+  `/workspace/mmx/phrases.json` (env `MMX_PHRASES`), mirrored to `/volume1/subgenula/mmx/phrases.json`
+  exactly like presets.json (same transport, union by (group, text), newer wins, tombstones).
+  Seeded with the two studio constraints — "…is the absolute first frame of the video." and
+  "Construct the character reference using …" — plus the camera / lighting fragments of the
+  studio's default pool and three pacing phrases. A phrase with an ellipsis at either end is
+  inserted without it, so `<Picture 9>` + the first chip reads
+  `<Picture 9> is the absolute first frame of the video.`
+- *Presets*: dropdown + name + Load / Save / Update / Delete / ↻. Load fills the editor AND the
+  five LoRA rows; Save writes a new preset (refuses an existing name), Update overwrites, Delete
+  asks first. All through `/mmx/presets/*` (NAS push after each). Nothing is saved on queue.
+- *Send to graph* writes the editor into the Manager's `direction` and the five rows into the
+  MMX LoRA Stack, highlights both nodes for 2.5 s, prints a landed report with `[jump]` links,
+  and arms *Undo* (restores both). *Pull from graph* reads both back into the panel. Targets are
+  two dropdowns over the graph's Managers / Stacks, remembered per browser (`localStorage`
+  `mmx.targets`) and in the node's `targets_json`.
+
+**MMX LoRA Stack** — model, clip in/out; five rows of `on_N` / `lora_N` (dropdown over
+`models/loras`) / `strength_N` (0–2) as plain widgets, so injection is just setting widget
+values (no rgthree internals). Enabled rows are applied in order with core `LoraLoader` (same
+strength on model and clip); the body shows the effective stack live and after execution;
+`↻ Refresh LoRAs` re-scans the folder into all five dropdowns. Validation is the node's own, so a
+LoRA copied in after the page loaded queues fine.
+
+**Library → Manager injection** (MMX Library Image): a `slot` widget (Picture 1–9 / Video 1–3 /
+Audio 1) and `⇢ Inject into Manager`: the file is copied into `ComfyUI/input`
+(`POST /mmx/library/inject`) and written into the Manager's `references_json` at that slot; the
+Manager's slot UI re-renders with the tile. The RefPack list is compact, so "Picture 9" with one
+image present lands as `<Picture 2>` — the node says so ("asked for Picture 9 … it is
+<Picture 2>"). A video injected into a Picture slot contributes its first frame
+(`<flat>__frame0.png`); into a Video slot the mp4 itself (soundtrack on). `✕ Clear slot` removes
+that entry (later ones move up); `⇢ Inject all (group)` injects every Library node inside the same
+canvas group (or all of them when the node is in no group) in slot order and reports each. The
+Manager used is the one remembered by the Deck's target dropdown (else the first in the graph).
+
+**MMX References Manager** — a drop-in for `MiniMaxH3ReferencePack` (node 185): identical inputs
+and all 20 outputs, the RefPack's own widget (our extension hands the RefPack's
+`beforeRegisterNodeDef` a nodeData wearing its name). The RefPack keeps its reference list in
+`node._mmrpRefs` and re-reads `references_json` only inside its `onConfigure` wrapper, so a plain
+widget write from outside never re-rendered its tiles. Now it does, on the stock node too: the
+`mmx.manager` extension wraps the DOM widget's `options.setValue` (the `value` accessor is an own,
+non-configurable property on the current frontend; a data-property fallback and a slow poll cover
+other frontends) and queues one re-render through that wrapper. In the Python subclass a blank
+`openrouter_api_key` falls back to `OPENROUTER_API_KEY`, then `LLM_KEY`, then `OPENROUTER_KEY`
+(the Vast template's name), from this process's env or PID 1's. `deck.json` keeps the stock node
+185 (the API works on both); swap it for MMX References Manager when you want the key fallback
+inside the node.
+
+`window.mmx` (web/mmx_api.js): `findManagers / findStacks / defaultManager / defaultStack`,
+`getReferences / setReferences(node, list) / tagsOf(node) / setReferenceSlot(node, "Picture 3", ref)
+/ clearReferenceSlot`, `getDirection / setDirection`, `getStack / setStack(node, rows)`,
+`injectLibrary(libNode, manager)`, `jumpTo / highlight`, `refreshManager`.
+
+**First Frame Check**: `reference` is optional and there is an `enabled` toggle. Disabled, or no
+reference connected (the first segment): no error, `passed=True`, `psnr=ssim=-1`,
+`comparison` = the frame-0 image, body says `skipped (first segment): …` in a neutral colour.
+Chain Gate is unchanged.
+
+Routes added: `GET /mmx/phrases`, `POST /mmx/phrases/refresh|add|delete|replace`,
+`POST /mmx/library/inject`, `GET /mmx/loras?refresh=1`, `GET /mmx/status` (key present,
+RefPack found, Manager registered, store paths).
+
 ## Nodes (category `mmx`)
 
 | node | inputs | outputs |
 |---|---|---|
 | **MMX Preset** | model, clip, preset (dropdown from the store), strength_scale | model + clip with the preset's LoRAs applied in order (core `LoraLoader`, strength × scale on model and clip), prompt STRING, preset_name STRING |
-| **MMX Preset Save** | name, prompt STRING (type or connect), overwrite, notes, up to 3 × (lora dropdown, strength) | preset_name; OUTPUT_NODE — runs every time it is queued, writes the store and pushes to the NAS |
+| **MMX Preset Save** | name, prompt STRING (type or connect), overwrite, notes, up to 5 × (lora dropdown, strength) | preset_name; OUTPUT_NODE — runs every time it is queued, writes the store and pushes to the NAS |
+| **MMX Deck** | prompt, preset, loras_json, targets_json (hidden; the panel edits them) | prompt STRING, loras_json STRING — executing it is a passthrough; Send / Save are buttons |
+| **MMX LoRA Stack** | model, clip, 5 × (on, lora, strength 0–2) | model, clip, stack STRING (the effective rows) |
+| **MMX References Manager** | = MiniMaxH3ReferencePack | = MiniMaxH3ReferencePack (20 outputs) + key fallback + re-render on external write |
 | **MMX Sequence** | model, clip, index INT, strength_scale, preset_1..preset_8 | model, clip, prompt, preset_name, slot, count — empty slots skipped, index wraps over the filled ones |
 | **MMX Save Frame (fixed name)** | image, filename | writes the LAST image of the batch as `input/<filename>.png`, overwriting (OUTPUT_NODE) |
 | **MMX Load Chain Frame** | fallback IMAGE, filename, use_fallback | the saved frame when it exists, else the fallback; re-executes when the file changes |
-| **MMX First Frame Check** | images (VAE Decode batch), reference IMAGE (slot-9 image or previous last frame), threshold_db (24) | psnr FLOAT, ssim FLOAT, passed BOOLEAN, comparison IMAGE (reference \| frame 0 \| abs-diff heat-map, labelled); OUTPUT_NODE — numbers + PASS/FAIL shown in the node, strip previewed |
+| **MMX First Frame Check** | images (VAE Decode batch), threshold_db (24), reference IMAGE (optional: slot-9 image or previous last frame), enabled | psnr FLOAT, ssim FLOAT, passed BOOLEAN, comparison IMAGE (reference \| frame 0 \| abs-diff heat-map, labelled); OUTPUT_NODE — numbers + PASS/FAIL shown in the node, strip previewed; no reference / disabled → skipped (passed=True, psnr=-1, comparison=frame 0) |
 | **MMX Chain Gate** | images, passed BOOLEAN, filename (`mmx_chain_last.png`), stop_queue | path STRING, written BOOLEAN. passed → writes the LAST frame to `input/<filename>` (overwrite). not passed → writes `<stem>_REJECTED.png`, leaves the previous good frame untouched, clears the pending queue and raises `MMX Chain Gate: first-frame check FAILED …` |
-| **MMX Library Image** | file (dropdown over `/workspace/mmx/library/{Subjects,VideoRef,Sets}/**`) | image IMAGE (mp4: first frame), filename STRING (the file copied into `ComfyUI/input` as `Subjects__j__j1.jpg`, for the References Manager), path STRING |
+| **MMX Library Image** | file (dropdown over `/workspace/mmx/library/{Subjects,VideoRef,Sets}/**`), slot (Picture 1–9 / Video 1–3 / Audio 1 for Inject) | image IMAGE (mp4: first frame), filename STRING (the file copied into `ComfyUI/input` as `Subjects__j__j1.jpg`, for the References Manager), path STRING |
 | **MMX References Builder** | image_1..9, video_1..3, audio_1 (STRING, optional), use_soundtrack | references_json STRING (exact `MiniMaxH3ReferencePack` schema, compacted in slot order), picture_map STRING (`slot 9 -> <Picture 5>`, `video 1 -> <Video 1> (+ soundtrack <Audio 1>)`) |
 
 Selecting a preset changes the prompt and the LoRA stack together: the node re-executes whenever
@@ -67,8 +160,9 @@ the current index resolves to.
 
 HTTP routes on ComfyUI's port: `GET /mmx/presets`, `POST /mmx/presets/refresh`,
 `POST /mmx/presets/import[?overwrite=1]`, `POST /mmx/presets/save`, `POST /mmx/presets/delete`,
-`GET /mmx/presets/status`, `GET /mmx/loras`, `GET /mmx/library`, `POST /mmx/library/refresh[?sync=1]`,
-`GET /mmx/library/thumb?path=<rel>[&w=320]`, `GET /mmx/library/sync`.
+`GET /mmx/presets/status`, `GET /mmx/loras[?refresh=1]`, `GET /mmx/library`, `POST /mmx/library/refresh[?sync=1]`,
+`GET /mmx/library/thumb?path=<rel>[&w=320]`, `GET /mmx/library/sync`, `POST /mmx/library/inject`,
+`GET /mmx/phrases`, `POST /mmx/phrases/refresh|add|delete|replace`, `GET /mmx/status`.
 
 ## First-frame verification (the check + gate pair)
 
@@ -129,8 +223,27 @@ Pick your own library files in the two dropdowns (the example carries placeholde
 
 ## Verification
 
-- `python3 tests/test_pack.py` — 52 checks with ComfyUI stubbed (check / gate / library /
-  references need torch + PIL, the mp4 case ffmpeg).
+- `python3 tests/test_pack.py` — 76 checks with ComfyUI stubbed (check / gate / library /
+  references need torch + PIL, the mp4 case ffmpeg; the References Manager checks need the
+  RefPack importable: `MMX_REFPACK_DIR=/path/to/ComfyUI-MiniMaxRefPack`). Covers the 5-row
+  presets, delete tombstones surviving a NAS pull, the phrase store (seed, add / delete / bulk
+  replace, mirror round trip, re-seed after a local loss keeping deletions), the LoRA Stack,
+  the Deck passthrough, the Manager subclass + key fallback, the check's skip path and inject.
+- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR]` — 42 frontend checks
+  (playwright chromium) on `examples/deck.json`: no missing types; the stack took over #137's
+  links with the turbo LoRA untouched; tag buttons follow the Manager's slots; Inject / Clear
+  slot / Inject all land in the Manager's slot UI (tiles) and are reported honestly; Send lands
+  in the Manager's direction (widget + textarea) and the Stack's rows (widgets + body), with
+  jump links, highlight and Undo; `app.graphToPrompt()` and `graph.serialize()` carry the same
+  direction / references_json / rows; preset Save / Load / Update / Delete round-trip with the
+  on flags; phrase chip insert (ellipsis rule), add, delete; the MMX References Manager drop-in
+  re-renders on a plain widget write; the check skips cleanly with no reference and when
+  disabled, and still PASSes with one; ↻ Refresh; no extension errors.
+- 2026-09-09: both run green on a CPU ComfyUI 0.34 / frontend 1.51.9 with the RefPack, rgthree,
+  KJNodes, VHS and ComfyMath installed (no H3 weights, so the model loaders show the frontend's
+  "6 errors" — environmental). Not run on a GPU box: the LoRA Stack actually loading a LoRA
+  into the H3 model, the Manager's OpenRouter call through the key fallback, and a full
+  sampling run of `deck.json` are unverified live.
 - `python3 tools/live_check.py --server http://HOST:8188 --frame s1_first.png --good-ref
   first_frame.png --bad-ref identity.png --lib-image Subjects/j/identity.png --lib-video
   VideoRef/seg1.mp4` — 16 checks against a running ComfyUI: correct reference passes (31.6 dB on
@@ -201,6 +314,7 @@ lists the store. Batch runs from the studio and canvas runs therefore share one 
 ## Tests
 
 ```
-python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (27 checks; chain
-                               # helper checks need torch + PIL and are skipped without them)
+python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (76 checks; torch /
+                               # PIL / ffmpeg / RefPack dependent ones are skipped without them)
+python3 tools/ui_check_deck.py --server http://127.0.0.1:8188   # 42 playwright checks on deck.json
 ```

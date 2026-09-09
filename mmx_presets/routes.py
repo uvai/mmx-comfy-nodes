@@ -8,7 +8,15 @@ button and by tooling:
   POST /mmx/presets/save            -> body: one preset {name, prompt, loras, notes} (+ NAS push)
   POST /mmx/presets/delete          -> body: {name}
   GET  /mmx/presets/status          -> store path + mirror status
-  GET  /mmx/loras                   -> current models/loras listing (for the extension)
+  GET  /mmx/loras[?refresh=1]       -> current models/loras listing (refresh=1: drop the folder cache first)
+  GET  /mmx/phrases                 -> {groups:[{name, phrases:[{text, updated}]}], path, nas}
+  POST /mmx/phrases/refresh         -> pull from the NAS, re-read; same shape as GET
+  POST /mmx/phrases/add             -> body {group, text}         (+ NAS push)
+  POST /mmx/phrases/delete          -> body {group, text}         (+ NAS push)
+  POST /mmx/phrases/replace         -> body {groups:[...]}: bulk edit from the Deck (+ NAS push)
+  POST /mmx/library/inject          -> body {path, slot}: copy the library file into ComfyUI/input
+                                       -> {filename, kind, frame_png} for the References Manager
+  GET  /mmx/status                  -> {openrouter_key: bool, refpack: bool, manager: bool, presets, phrases}
   GET  /mmx/library                 -> {root, items:[{path, name, folder, kind, size, mtime}], count, sync}
   POST /mmx/library/refresh[?sync=1]-> re-scan the mirror (sync=1: start the NAS mirror script first)
   GET  /mmx/library/thumb?path=<rel>[&w=320] -> image/jpeg (first frame for videos)
@@ -20,6 +28,7 @@ import json
 
 from . import store as S
 from . import library as L
+from . import phrases as P
 
 
 def _payload(st: S.PresetStore) -> dict:
@@ -89,11 +98,79 @@ def register(server_instance) -> bool:
     @routes.get("/mmx/loras")
     async def loras_get(request):
         try:
-            import folder_paths
-            names = list(folder_paths.get_filename_list("loras"))
+            from . import lora_stack as LS
+            names = LS.lora_names(refresh=request.query.get("refresh") == "1")[1:]
         except Exception:
             names = []
         return web.json_response({"loras": names})
+
+    # ── phrases ──
+    ph = P.get_store()
+
+    def _phrases_payload():
+        return {"groups": ph.load()["groups"], "updated": ph.data["updated"], "path": ph.path, "nas": ph.nas_status()}
+
+    @routes.get("/mmx/phrases")
+    async def phrases_get(request):
+        return web.json_response(_phrases_payload())
+
+    @routes.post("/mmx/phrases/refresh")
+    async def phrases_refresh(request):
+        pulled = ph.pull()
+        ph.load(force=True)
+        out = _phrases_payload(); out["pull"] = pulled
+        return web.json_response(out)
+
+    @routes.post("/mmx/phrases/add")
+    async def phrases_add(request):
+        try:
+            body = await request.json()
+            added = ph.add(str(body.get("group", "")), str(body.get("text", "")))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+        ph.push_async()
+        out = _phrases_payload(); out["added"] = added
+        return web.json_response(out)
+
+    @routes.post("/mmx/phrases/delete")
+    async def phrases_delete(request):
+        try:
+            body = await request.json()
+            ok = ph.remove(str(body.get("group", "")), str(body.get("text", "")))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+        if ok:
+            ph.push_async()
+        out = _phrases_payload(); out["deleted"] = ok
+        return web.json_response(out)
+
+    @routes.post("/mmx/phrases/replace")
+    async def phrases_replace(request):
+        try:
+            body = await request.json()
+            ph.replace_all(body.get("groups") or [])
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+        ph.push_async()
+        return web.json_response(_phrases_payload())
+
+    @routes.post("/mmx/library/inject")
+    async def library_inject(request):
+        try:
+            import folder_paths
+            body = await request.json()
+            out = L.inject_file(str(body.get("path", "")), folder_paths.get_input_directory(), str(body.get("slot", "")))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response(out)
+
+    @routes.get("/mmx/status")
+    async def status_get(request):
+        from . import manager as M
+        return web.json_response({"openrouter_key": bool(M.resolve_key("")), "refpack": M._BASE is not None,
+                                  "manager": "MMXReferencesManager" in M.NODE_CLASS_MAPPINGS, "refpack_reason": M._REASON,
+                                  "presets": len(st.load()["presets"]), "phrases": sum(len(g["phrases"]) for g in ph.load()["groups"]),
+                                  "presets_path": st.path, "phrases_path": ph.path})
 
     def _library_payload():
         items = L.scan()
