@@ -22,10 +22,8 @@ def _preset_names() -> list:
 
 
 def _lora_names() -> list:
-    try:
-        return [NONE] + list(folder_paths.get_filename_list("loras"))
-    except Exception:
-        return [NONE]
+    from . import lora_stack as LS   # one call-time scan shared by every node that lists LoRAs
+    return LS.lora_names(refresh=True)
 
 
 def _sig(preset: dict | None) -> str:

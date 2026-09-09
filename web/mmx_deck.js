@@ -17,11 +17,7 @@ async function loadPresets(refresh) {
   for (const p of d.presets || []) cache.presets[p.name] = p;
   return d;
 }
-async function loadLoras(refresh) {
-  const d = await M.fetchJson("/mmx/loras" + (refresh ? "?refresh=1" : ""));
-  cache.loras = d.loras || [];
-  return d;
-}
+async function loadLoras(refresh) { return M.loadLoras(); }   // the shared list (fires mmx-loras-changed)
 async function loadPhrases(refresh) {
   const d = await M.fetchJson(refresh ? "/mmx/phrases/refresh" : "/mmx/phrases", refresh ? {} : null);
   cache.groups = d.groups || [];
@@ -279,10 +275,9 @@ function renderPhrases(node) {
 function renderRows(node) {
   const ui = node._mmxDeck; if (!ui) return;
   const st = readState(node);
-  const values = [M.NONE, ...cache.loras];
   ui.rows.forEach((r, i) => {
     const row = st.rows[i];
-    const opts = values.includes(row.name) ? values : [...values, row.name];
+    const opts = M.loraValues(row.name);
     const sig = opts.join("|");
     if (r.sel._sig !== sig) { r.sel._sig = sig; r.sel.innerHTML = ""; for (const v of opts) r.sel.appendChild(el("option", { value: v, text: v === M.NONE ? v : v.replace(/\.safetensors$/, "") })); }
     r.sel.value = row.name; r.str.value = row.strength; r.on.checked = row.on;
@@ -447,10 +442,11 @@ app.registerExtension({
     window.addEventListener("mmx-graph-changed", onGraph);
     const onReg = () => { if (node.graph) { renderRows(node); } };
     window.addEventListener("mmx-registry-changed", onReg);
+    window.addEventListener("mmx-loras-changed", onReg);
     root.addEventListener("mouseenter", onGraph);
     node._mmxTick = setInterval(() => { if (!node.graph) { clearInterval(node._mmxTick); return; } onGraph(); }, 1500);
     const origRemoved = node.onRemoved;
-    node.onRemoved = function (...a) { clearInterval(node._mmxTick); window.removeEventListener("mmx-graph-changed", onGraph); window.removeEventListener("mmx-registry-changed", onReg); return origRemoved?.apply(this, a); };
+    node.onRemoved = function (...a) { clearInterval(node._mmxTick); window.removeEventListener("mmx-graph-changed", onGraph); window.removeEventListener("mmx-registry-changed", onReg); window.removeEventListener("mmx-loras-changed", onReg); return origRemoved?.apply(this, a); };
     node.mmxDeck = { send: () => send(node), pull: () => pull(node), undo: () => undo(node), loadPreset: n => loadPreset(node, n), save: o => savePreset(node, o), state: () => readState(node), render: () => renderAll(node), editRegistry: i => openRegistryEditor(node, i), ui: node._mmxDeck };
   },
 });

@@ -134,6 +134,26 @@ export function clearReferenceSlot(node, spec) {
   return { requested: s.spec, removed: gone.file };
 }
 
+// ── the LoRA file list (ONE source for the Stack rows, the Deck rows and Preset Save) ─────────
+// Filled from /mmx/loras (a call-time scan of models/loras, the same call INPUT_TYPES makes) or
+// from a fresh object_info (the frontend's "R"); every change fires "mmx-loras-changed".
+export const loras = { list: [], loaded: false };
+export function setLoraList(list) {
+  const next = (list || []).filter(x => x && x !== NONE);
+  const changed = !loras.loaded || next.length !== loras.list.length || next.some((x, i) => x !== loras.list[i]);
+  loras.list = next; loras.loaded = true;
+  if (changed) { try { window.dispatchEvent(new CustomEvent("mmx-loras-changed", { detail: { list: next } })); } catch (e) {} }
+  return next;
+}
+export async function loadLoras() {
+  const d = await fetchJson("/mmx/loras");
+  return setLoraList(d.loras || []);
+}
+export function loraValues(current) {
+  const values = [NONE, ...loras.list];
+  return current && !values.includes(current) ? [...values, current] : values;   // a saved name that left the folder stays visible; the server validates
+}
+
 // ── LoRA registry (triggers / phrases per LoRA file, mirrored via mmx/loras.json) ─────────
 export const registry = { loras: {}, loaded: false, path: "" };
 export async function loadRegistry(refresh) {
@@ -172,7 +192,7 @@ export function setStack(node, rows) {
   norm.forEach((r, i) => {
     const lw = widget(node, `lora_${i + 1}`), sw = widget(node, `strength_${i + 1}`), ow = widget(node, `on_${i + 1}`);
     if (lw) {
-      if (lw.options?.values && !lw.options.values.includes(r.name)) lw.options.values = [...lw.options.values, r.name];   // shows the name; the server validates the file
+      lw.options.values = loras.loaded ? loraValues(r.name) : (lw.options?.values && !lw.options.values.includes(r.name) ? [...lw.options.values, r.name] : lw.options?.values);
       lw.value = r.name; lw.callback?.(r.name);
     }
     if (sw) { sw.value = r.strength; sw.callback?.(r.strength); }
@@ -241,7 +261,7 @@ window.mmx = {
   nodeById, findManagers, findStacks, findLibraries, defaultManager, defaultStack, remember, remembered,
   getReferences, setReferences, tagsOf, setReferenceSlot, clearReferenceSlot, parseSlot,
   getDirection, setDirection, refreshManager,
-  getStack, setStack, describeStack, effectiveRows, registry, loadRegistry, triggersFor,
+  getStack, setStack, describeStack, effectiveRows, registry, loadRegistry, triggersFor, loras, loadLoras, setLoraList, loraValues,
   jumpTo, highlight, injectLibrary, label,
 };
 export default window.mmx;

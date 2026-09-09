@@ -14,7 +14,7 @@ async function fetchPresets(refresh) {
   cache.names = d.names || [];
   cache.presets = {};
   for (const p of d.presets || []) cache.presets[p.name] = p;
-  try { const l = await (await api.fetchApi("/mmx/loras")).json(); cache.loras = l.loras || []; } catch (e) {}
+  try { const l = await (await api.fetchApi("/mmx/loras")).json(); cache.loras = l.loras || []; if (window.mmx?.setLoraList) window.mmx.setLoraList(cache.loras); } catch (e) {}
   return d;
 }
 

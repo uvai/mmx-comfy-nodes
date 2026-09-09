@@ -16,12 +16,12 @@ ROWS = 5
 NONE = "(none)"
 
 
-def lora_names(refresh: bool = False) -> list:
+def lora_names(refresh: bool = True) -> list:
+    """[NONE] + models/loras, scanned NOW. folder_paths caches per folder and only re-scans when a
+    directory mtime moves; dropping the cache entry first makes every /object_info (the frontend's
+    "R"), /mmx/loras and INPUT_TYPES call return the folder as it is at that moment."""
     try:
         if refresh:
-            # folder_paths caches per folder and re-scans when a directory mtime changes; a file
-            # dropped into an existing folder bumps the mtime, so a plain call already sees it —
-            # the explicit cache drop covers filesystems that do not update the directory mtime.
             try:
                 folder_paths.filename_list_cache.pop("loras", None)
             except Exception:
@@ -66,7 +66,7 @@ def describe(rows: list, info: dict | None = None) -> str:
 class MMXLoRAStack:
     @classmethod
     def INPUT_TYPES(cls):
-        names = lora_names()
+        names = lora_names(refresh=True)   # evaluated on every /object_info request, never at import
         req = {"model": ("MODEL",), "clip": ("CLIP",)}
         for i in range(1, ROWS + 1):
             req[f"on_{i}"] = ("BOOLEAN", {"default": i == 1, "label_on": "on", "label_off": "off"})

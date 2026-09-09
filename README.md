@@ -95,6 +95,17 @@ strength on model and clip); the body shows the effective stack live and after e
 `↻ Refresh LoRAs` re-scans the folder into all five dropdowns. Validation is the node's own, so a
 LoRA copied in after the page loaded queues fine.
 
+**Refreshing the dropdowns.** `MMXLoRAStack.INPUT_TYPES`, `MMXPresetSave.INPUT_TYPES`,
+`/mmx/loras` and `MMXLibraryImage.INPUT_TYPES` all scan at call time (the loras folder with
+ComfyUI's per-folder cache dropped first, the library mirror bypassing its 20 s scan cache), so
+`/object_info` — the frontend's **R** (refresh node definitions) — always returns the folder as it
+is now. On the frontend the LoRA list has one owner (`window.mmx.loras`, event
+`mmx-loras-changed`): R feeds it from the fresh definition through the `refreshComboInNodes`
+extension hook (which also re-reads the library mirror and re-applies each Library node's search
+filter), the Stack's `↻ Refresh LoRAs` and the Deck's `↻` feed it from `/mmx/loras`, and every
+Stack row, Deck row and Preset Save dropdown repopulates from it — so the three paths always show
+the identical list.
+
 **Library → Manager injection** (MMX Library Image): a `slot` widget (Picture 1–9 / Video 1–3 /
 Audio 1) and `⇢ Inject into Manager`: the file is copied into `ComfyUI/input`
 (`POST /mmx/library/inject`) and written into the Manager's `references_json` at that slot; the
@@ -266,7 +277,7 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   presets, delete tombstones surviving a NAS pull, the phrase store (seed, add / delete / bulk
   replace, mirror round trip, re-seed after a local loss keeping deletions), the LoRA Stack,
   the Deck passthrough, the Manager subclass + key fallback, the check's skip path and inject.
-- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR]` — 51 frontend checks
+- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR] [--loras-dir …/models/loras --library-dir …/mmx/library]` — 56 frontend checks
   (playwright chromium) on `examples/deck.json`: no missing types; the stack took over #137's
   links with the turbo LoRA untouched; tag buttons follow the Manager's slots; Inject / Clear
   slot / Inject all land in the Manager's slot UI (tiles) and are reported honestly; Send lands
@@ -279,7 +290,10 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   wired Manager → Affix → R2V/Display with the Stack's `triggers` in the API JSON; editing a row's
   triggers from the Deck lands in the registry, the Stack body and the Send report; disabling the
   row drops them; a registry refresh keeps the user entry; executing the Affix prepends /
-  appends / passes through.
+  appends / passes through. With `--loras-dir` / `--library-dir` it drops a file into each,
+  calls `app.refreshComboInNodes()` (R) and asserts the new names appear in `/object_info`, in
+  all five Stack rows, all five Deck rows and the Library dropdown, that the node's Refresh, the
+  Deck's ↻ and R yield the identical list, and that the names disappear again after removal + R.
 - 2026-09-09: both run green on a CPU ComfyUI 0.34 / frontend 1.51.9 with the RefPack, rgthree,
   KJNodes, VHS and ComfyMath installed (no H3 weights, so the model loaders show the frontend's
   "6 errors" — environmental). Not run on a GPU box: the LoRA Stack actually loading a LoRA
@@ -355,7 +369,7 @@ lists the store. Batch runs from the studio and canvas runs therefore share one 
 ## Tests
 
 ```
-python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (90 checks; torch /
+python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (92 checks; torch /
                                # PIL / ffmpeg / RefPack dependent ones are skipped without them)
-python3 tools/ui_check_deck.py --server http://127.0.0.1:8188   # 51 playwright checks on deck.json
+python3 tools/ui_check_deck.py --server http://127.0.0.1:8188   # 56 playwright checks on deck.json
 ```

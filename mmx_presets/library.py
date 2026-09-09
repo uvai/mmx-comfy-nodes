@@ -254,8 +254,10 @@ class MMXLibraryImage:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # scanned NOW (not the 20 s cache) so the frontend's "R" / object_info refresh lists a file
+        # that just landed in the mirror
         return {"required": {
-            "file": (paths(), {"tooltip": "Subjects / VideoRef / Sets under " + root() + " — type in the search box of the node to filter; Refresh re-scans, Mirror from NAS re-syncs."}),
+            "file": (paths(force=True), {"tooltip": "Subjects / VideoRef / Sets under " + root() + " — type in the search box of the node to filter; Refresh re-scans, Mirror from NAS re-syncs."}),
         }, "optional": {
             "slot": (SLOTS, {"default": SLOT_NONE, "tooltip": "References Manager slot the Inject button writes this file into (Picture n = n-th image; a video into a Picture slot contributes its first frame)"}),
         }}

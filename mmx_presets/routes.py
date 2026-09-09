@@ -106,7 +106,7 @@ def register(server_instance) -> bool:
     async def loras_get(request):
         try:
             from . import lora_stack as LS
-            names = LS.lora_names(refresh=request.query.get("refresh") == "1")[1:]
+            names = LS.lora_names(refresh=True)[1:]   # always the folder as it is now (same list as /object_info)
         except Exception:
             names = []
         return web.json_response({"loras": names})

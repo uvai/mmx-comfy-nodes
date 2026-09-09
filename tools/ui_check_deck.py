@@ -28,6 +28,8 @@ def main():
     ap.add_argument("--server", default="http://127.0.0.1:8188")
     ap.add_argument("--frame", default="s1_first.png", help="an image in ComfyUI/input for the check-skip run")
     ap.add_argument("--shots", default="")
+    ap.add_argument("--loras-dir", default="", help="ComfyUI/models/loras on this host: a file is dropped there to test the R refresh")
+    ap.add_argument("--library-dir", default="", help="the library mirror root on this host (MMX_LIBRARY): a file is dropped there for the same test")
     ap.add_argument("--lib-a", default="Subjects/j/identity.png"); ap.add_argument("--lib-b", default="Sets/room/first_frame.png"); ap.add_argument("--lib-video", default="VideoRef/seg1.mp4")
     a = ap.parse_args()
     shot = (lambda n: None) if not a.shots else (lambda n: pg.screenshot(path=os.path.join(a.shots, n + ".png")))
@@ -188,6 +190,45 @@ def main():
         pg.evaluate("""() => { const d = app.graph.getNodeById(400), ui = d._mmxDeck; ui.rows[0].on.checked = true; ui.rows[0].on.dispatchEvent(new Event('change')); ui.btnSend.click(); }""")
         registry_after = pg.evaluate("async () => (await (await fetch('/mmx/registry/refresh', {method: 'POST'})).json()).loras['MiniMax-H3-Ref2VA-Acc-8Step.safetensors']")
         check("registry refresh (pull + pre-fill) keeps the user entry", registry_after and registry_after["triggers"] == ["accel8", "turbo mode"] and registry_after["auto"] is False, str(registry_after))
+
+        # 4c. "R" (refresh node definitions): a file dropped into models/loras / the library mirror shows up in the Stack rows,
+        #     the Deck rows and the Library dropdown, and the node's own Refresh + the Deck's ↻ give the same list
+        if a.loras_dir:
+            new_lora, new_lib = "ZZ_dropped_after_load.safetensors", "Subjects/j/zz_dropped_after_load.png"
+            open(os.path.join(a.loras_dir, new_lora), "wb").write(b"\x00" * 64)
+            if a.library_dir:
+                import shutil
+                shutil.copy(os.path.join(a.library_dir, a.lib_a), os.path.join(a.library_dir, new_lib))
+            try:
+                before = pg.evaluate("""() => ({stack: app.graph.getNodeById(137).widgets.find(w => w.name === 'lora_1').options.values.slice(), lib: app.graph.getNodeById(401).widgets.find(w => w.name === 'file').options.values.slice()})""")
+                check("before R: the dropped files are not listed yet", new_lora not in before["stack"] and new_lib not in before["lib"], str(before)[:300])
+                r = pg.evaluate("""async ([lora, lib]) => { await app.refreshComboInNodes(); await new Promise(r => setTimeout(r, 800));
+                    const stk = app.graph.getNodeById(137), d = app.graph.getNodeById(400), l = app.graph.getNodeById(401);
+                    const oi = await (await fetch('/object_info/MMXLoRAStack')).json();
+                    const oiLib = await (await fetch('/object_info/MMXLibraryImage')).json();
+                    return {oi: oi.MMXLoRAStack.input.required.lora_1[0].includes(lora), oiLib: oiLib.MMXLibraryImage.input.required.file[0].includes(lib),
+                            stackRows: stk.widgets.filter(w => /^lora_\\d$/.test(w.name)).map(w => w.options.values.includes(lora)),
+                            deckRows: d._mmxDeck.rows.map(r => [...r.sel.options].some(o => o.value === lora)),
+                            libValues: l.widgets.find(w => w.name === 'file').options.values.includes(lib), libSearchOk: l.widgets.find(w => w.name === 'mmx_search') != null,
+                            shared: window.mmx.loras.list.includes(lora)}; }""", [new_lora, new_lib])
+                check("after R: /object_info lists the new LoRA and the new library file (call-time scans)", r["oi"] and r["oiLib"], str(r))
+                check("after R: all 5 Stack rows, all 5 Deck rows and the shared list carry the new LoRA; the Library dropdown lists the new file", all(r["stackRows"]) and all(r["deckRows"]) and r["shared"] and r["libValues"], str(r))
+                r = pg.evaluate("""async (lora) => { const stk = app.graph.getNodeById(137), d = app.graph.getNodeById(400);
+                    await stk.widgets.find(w => w.name.startsWith('↻ Refresh LoRAs')).callback(); const fromStack = stk.widgets.find(w => w.name === 'lora_1').options.values.slice();
+                    d._mmxDeck.btnRefresh.click(); await new Promise(r => setTimeout(r, 1500)); const fromDeck = [...d._mmxDeck.rows[0].sel.options].map(o => o.value);
+                    const oi = await (await fetch('/object_info/MMXLoRAStack')).json(); const fromR = oi.MMXLoRAStack.input.required.lora_1[0];
+                    return {same: JSON.stringify(fromStack) === JSON.stringify(fromDeck) && JSON.stringify(fromStack) === JSON.stringify(fromR), fromStack, fromDeck, fromR}; }""", new_lora)
+                check("the node's Refresh, the Deck's ↻ and R yield the identical list", r["same"], json.dumps(r)[:400])
+            finally:
+                os.remove(os.path.join(a.loras_dir, new_lora))
+                if a.library_dir:
+                    try: os.remove(os.path.join(a.library_dir, new_lib))
+                    except OSError: pass
+            pg.evaluate("async () => { await app.refreshComboInNodes(); }"); time.sleep(0.8)
+            r = pg.evaluate("""(lora) => app.graph.getNodeById(137).widgets.find(w => w.name === 'lora_1').options.values.includes(lora)""", new_lora)
+            check("after removing the file + R it is gone again", r is False)
+        else:
+            print("skip R-refresh checks (pass --loras-dir / --library-dir for this host)")
 
         # 5. presets round trip (save -> reload page state -> load -> update -> delete)
         r = pg.evaluate("""async (prompt) => { const d = app.graph.getNodeById(400), ui = d._mmxDeck;

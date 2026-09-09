@@ -44,18 +44,20 @@ function setupStackNode(node) {
   for (const w of node.widgets || []) {
     if (/^(on|lora|strength)_\d$/.test(w.name)) { const orig = w.callback; w.callback = function (...a) { const r = orig?.apply(this, a); summary(); return r; }; }
   }
+  // the five dropdowns always show the shared list (R, this button and the Deck's ↻ all feed it)
+  const repopulate = () => { for (const w of node.widgets.filter(w => /^lora_\d$/.test(w.name))) w.options.values = M.loraValues(w.value); summary(); };
+  node.mmxRepopulateLoras = repopulate;
   const btn = node.addWidget("button", "↻ Refresh LoRAs", null, async () => {
     btn.name = "refreshing…"; node.setDirtyCanvas(true, true);
-    try {
-      const d = await (await api.fetchApi("/mmx/loras?refresh=1")).json();
-      const values = [M.NONE, ...(d.loras || [])];
-      for (const w of node.widgets.filter(w => /^lora_\d$/.test(w.name))) { w.options.values = values.includes(w.value) ? values : [...values, w.value]; }
-      btn.name = `↻ Refresh LoRAs (${(d.loras || []).length})`;
-    } catch (e) { btn.name = "↻ Refresh LoRAs (failed: " + (e?.message || e) + ")"; }
+    try { const list = await M.loadLoras(); repopulate(); btn.name = `↻ Refresh LoRAs (${list.length})`; }
+    catch (e) { btn.name = "↻ Refresh LoRAs (failed: " + (e?.message || e) + ")"; }
     setTimeout(() => { btn.name = "↻ Refresh LoRAs"; node.setDirtyCanvas(true, true); }, 4000);
     node.setDirtyCanvas(true, true);
   });
   btn.serialize = false; btn.options = { ...(btn.options || {}), serialize: false };
+  const onLoras = () => { if (node.graph) repopulate(); else window.removeEventListener("mmx-loras-changed", onLoras); };
+  window.addEventListener("mmx-loras-changed", onLoras);
+  if (M.loras.loaded) repopulate();
   const origConfigure = node.onConfigure;
   node.onConfigure = function (...a) { const r = origConfigure?.apply(this, a); summary(); return r; };
   const onReg = () => { if (node.graph) summary(); else window.removeEventListener("mmx-registry-changed", onReg); };
@@ -221,6 +223,21 @@ app.registerExtension({
     });
     try { await fetchLibrary(false); } catch (e) { console.warn("[mmx-nodes] library fetch failed", e); }
     try { await M.loadRegistry(false); } catch (e) { console.warn("[mmx-nodes] registry fetch failed", e); }
+    try { await M.loadLoras(); } catch (e) { console.warn("[mmx-nodes] loras fetch failed", e); }
+  },
+  // "R" / app.refreshComboInNodes: the frontend has just rewritten every combo from the fresh
+  // object_info. Take the LoRA list from that same definition (so the Stack rows, the Deck rows
+  // and Preset Save agree with what the server will validate), re-read the library mirror so the
+  // search filter works on the new file list, and repaint.
+  async refreshComboInNodes(defs) {
+    const fromDef = defs?.MMXLoRAStack?.input?.required?.lora_1?.[0];
+    if (Array.isArray(fromDef)) M.setLoraList(fromDef); else { try { await M.loadLoras(); } catch (e) {} }
+    try { await fetchLibrary(true, false); } catch (e) { console.warn("[mmx-nodes] library refresh failed", e); }
+    for (const n of app.graph._nodes || []) {
+      if (n.comfyClass === "MMXLibraryImage") { applyFilter(n); loadThumb(n); }
+      if (n.comfyClass === "MMXLoRAStack") n.mmxRepopulateLoras?.();
+    }
+    try { await M.loadRegistry(false); } catch (e) {}
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (!RESULT_NODES.includes(nodeData.name)) return;

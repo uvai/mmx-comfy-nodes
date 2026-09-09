@@ -203,6 +203,10 @@ def main():
     check("MMXLoRAStack applies enabled non-zero rows in order to model and clip", out["result"][0] == [(LORAS[1], 0.5), (LORAS[0], 1.2)] and out["result"][1] == [(LORAS[1], 0.5), (LORAS[0], 1.2)], str(out["result"][:2]))
     check("stack text lists the effective rows", out["result"][2].startswith("1. " + LORAS[1]) and "2. " + LORAS[0] + " @ 1.20" in out["result"][2], out["result"][2])
     check("stack VALIDATE_INPUTS names a missing file, accepts the rest", ls.MMXLoRAStack.VALIDATE_INPUTS(**kw) is True and "ghost.safetensors" in str(ls.MMXLoRAStack.VALIDATE_INPUTS(**{**kw, "lora_1": "ghost.safetensors"})))
+    LORAS.append("Dropped_Later.safetensors")
+    check("stack INPUT_TYPES scans models/loras at call time (a file added after import is listed)", "Dropped_Later.safetensors" in ls.MMXLoRAStack.INPUT_TYPES()["required"]["lora_1"][0]
+          and "Dropped_Later.safetensors" in nodes.MMXPresetSave.INPUT_TYPES()["required"]["lora_1"][0] and "Dropped_Later.safetensors" in ls.lora_names())
+    LORAS.pop()
     check("stack INPUT_TYPES: 5 x (on, lora, strength) after model/clip", list(ls.MMXLoRAStack.INPUT_TYPES()["required"])[:5] == ["model", "clip", "on_1", "lora_1", "strength_1"] and len(ls.MMXLoRAStack.INPUT_TYPES()["required"]) == 17)
 
     # LoRA registry: metadata pre-fill, edits win over auto, tombstones survive the mirror, stack outputs, affix
@@ -368,6 +372,10 @@ def main():
         check("MMXLibraryImage: image tensor, flat input filename, library path; file copied into input/",
               tuple(img.shape) == (1, 48, 64, 3) and float(img[0, 0, 0, 0]) > 0.99 and name == "Subjects__j__red.png" and os.path.isfile(os.path.join(fp.get_input_directory(), name)) and path == os.path.join(L, "Subjects/j/red.png"), str(out["result"][1:]))
         check("thumb jpeg", lib.thumb_jpeg("Subjects/j/red.png", 32)[:2] == b"\xff\xd8")
+        lib.scan(force=True)   # warm the 20 s scan cache, then drop a file: INPUT_TYPES must list it at once
+        Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(os.path.join(L, "Subjects", "j", "dropped_later.png"))
+        check("library INPUT_TYPES scans the mirror at call time (a file added inside the cache TTL is listed)", "Subjects/j/dropped_later.png" in lib.MMXLibraryImage.INPUT_TYPES()["required"]["file"][0])
+        os.remove(os.path.join(L, "Subjects", "j", "dropped_later.png")); lib.scan(force=True)
         inj = lib.inject_file("Subjects/j/red.png", fp.get_input_directory(), "Picture 2")
         check("inject_file: image copied into input/, kind image, slot echoed", inj["filename"] == "Subjects__j__red.png" and inj["kind"] == "image" and inj["frame_png"] is None and inj["slot"] == "Picture 2", str(inj))
         check("library slot widget lists (none) + Picture 1-9 + Video 1-3 + Audio 1", lib.SLOTS == ["(none)"] + [f"Picture {i}" for i in range(1, 10)] + [f"Video {i}" for i in range(1, 4)] + ["Audio 1"] and lib.MMXLibraryImage.INPUT_TYPES()["optional"]["slot"][0] == lib.SLOTS)
