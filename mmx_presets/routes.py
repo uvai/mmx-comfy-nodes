@@ -64,6 +64,16 @@ def register(server_instance) -> bool:
         ents = CH.list_history(fn)
         return web.json_response({"filename": fn, "latest": latest, "entries": ents, "choices": [CH.LATEST] + [e["name"] for e in ents], "dir": CH.history_dir(fn)})
 
+    @routes.post("/mmx/chain/inject")
+    async def chain_inject(request):
+        try:
+            import folder_paths
+            body = await request.json()
+            out = CH.inject_slot(str(body.get("filename") or "mmx_chain_last.png"), str(body.get("use_frame") or CH.LATEST), folder_paths.get_input_directory())
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+        return web.json_response(out)
+
     @routes.post("/mmx/chain/clear")
     async def chain_clear(request):
         body = await request.json()

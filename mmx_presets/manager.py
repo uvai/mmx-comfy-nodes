@@ -59,6 +59,17 @@ def parse_references(references_json: str) -> list:
     return [r for r in (refs or []) if isinstance(r, dict) and r.get("file")]
 
 
+def has_chain_slot(references_json: str) -> str | None:
+    """The static chain-slot picture (mmx_chain_slot_*.png, written by Load Chain Frame's
+    'Inject into Manager as slot') when the list holds one: then the run-time first_frame
+    override is skipped, so the two paths can never both apply."""
+    from . import chain_history as CH
+    for r in parse_references(references_json):
+        if r.get("kind") == "image" and CH.is_slot_file(r.get("file")):
+            return r["file"]
+    return None
+
+
 def find_marker(references_json: str) -> str | None:
     """The mmx_ff_* entry the frontend put into the exported list (its filename is what we write)."""
     for r in parse_references(references_json):
@@ -156,7 +167,12 @@ if _BASE is not None:
             if provider == "openrouter":
                 kw["openrouter_api_key"] = resolve_key(kw.get("openrouter_api_key") or "")
             note = ""
-            if first_frame is not None:
+            slot = has_chain_slot(kw.get("references_json") or "")
+            if first_frame is not None and slot:
+                images = [r for r in parse_references(kw.get("references_json") or "") if r.get("kind") == "image"]
+                n = next((i + 1 for i, r in enumerate(images) if r.get("file") == slot), len(images))
+                note = f"first_frame input IGNORED: the static chain slot {slot} is <Picture {n}> (delete that tile in the Manager to re-enable the run-time override)"
+            elif first_frame is not None:
                 import folder_paths
                 rj = kw.get("references_json") or ""
                 name, (w, h) = write_first_frame(first_frame, folder_paths.get_input_directory(), find_marker(rj))

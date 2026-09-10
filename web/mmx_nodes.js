@@ -266,7 +266,23 @@ async function refreshChainFrames(node, keepText) {
   }
   chainThumb(node, e, d.latest);
   node.setDirtyCanvas(true, true);
+  try { window.dispatchEvent(new CustomEvent("mmx-chain-changed", { detail: { node: node.id, filename: fn } })); } catch (e) {}   // the Manager's ghost tile follows
   return d;
+}
+// the static alternative to the run-time override: copy the loader's current chain frame to
+// input/mmx_chain_slot_<chain>.png and put it in the Manager's LAST picture slot; while that
+// entry is in references_json the Manager skips the run-time override (and hides its ghost)
+async function injectChainSlot(node) {
+  const g = n => node.widgets.find(w => w.name === n)?.value;
+  if (g("use_fallback") === true) throw new Error("use_fallback (start new chain) is on — the loader would open on its fallback; inject that Library file with its own Inject button, or turn the toggle off");
+  const mgr = M.defaultManager(); if (!mgr) throw new Error("no References Manager in the graph");
+  const r = await api.fetchApi("/mmx/chain/inject", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename: g("filename") || "mmx_chain_last.png", use_frame: g("use_frame") || LATEST }) });
+  const d = await r.json(); if (d.error) throw new Error(d.error);
+  const res = M.withChainSlot(M.getReferences(mgr), d.file);
+  M.setReferences(mgr, res.list); M.highlight(mgr);
+  const linked = !!M.firstFrameLink(mgr);
+  return `injected ${d.file} (${d.source}) as <Picture ${res.slot}> in ${M.label(mgr)}${res.replaced ? ` (replaced ${res.replaced.file}, list was full)` : ""}`
+       + (linked ? "\nfirst_frame is wired too: the run-time override is OFF while this tile is present (delete the tile in the Manager to get it back)" : "");
 }
 function setupChainFrameNode(node) {
   const fw = node.widgets.find(w => w.name === "use_frame");
@@ -285,8 +301,15 @@ function setupChainFrameNode(node) {
       showResult(node, `cleared ${d.removed} file(s) of chain history for ${fn}; use_frame reset to latest`);
     } catch (e) { showResult(node, "clear failed: " + (e?.message || e)); }
   });
-  for (const b of [refresh, clear]) { b.serialize = false; b.options = { ...(b.options || {}), serialize: false }; }
-  const ours = [refresh, clear, resultWidget(node)];
+  const inject = node.addWidget("button", "⇢ Inject into Manager as slot", null, async () => {
+    inject.name = "injecting…"; node.setDirtyCanvas(true, true);
+    try { const t = await injectChainSlot(node); showResult(node, t); inject.name = "⇢ Inject into Manager as slot (done)"; }
+    catch (e) { showResult(node, "inject failed: " + (e?.message || e)); inject.name = "⇢ Inject into Manager as slot (failed)"; }
+    setTimeout(() => { inject.name = "⇢ Inject into Manager as slot"; node.setDirtyCanvas(true, true); }, 4000);
+    node.setDirtyCanvas(true, true);
+  });
+  for (const b of [refresh, clear, inject]) { b.serialize = false; b.options = { ...(b.options || {}), serialize: false }; }
+  const ours = [refresh, clear, inject, resultWidget(node)];
   node.widgets = [...node.widgets.filter(w => !ours.includes(w)), ...ours];   // the node's own widgets (filename, use_fallback, use_frame) stay first
   node.mmxRefreshChain = keepText => refreshChainFrames(node, keepText);
   const origConfigure = node.onConfigure;

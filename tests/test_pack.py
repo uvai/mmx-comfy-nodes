@@ -282,6 +282,23 @@ def main():
         os.environ.pop("OPENROUTER_KEY")
         out = cls().build(direction="hello", references_json="", prompt_provider="none")
         check("manager subclass builds (provider none): prompt passthrough, 20 outputs", len(out) == 20 and out[18] == "hello", str(out[18:]))
+        try:
+            import torch as _t
+            from PIL import Image as _I
+            inp = fp.get_input_directory(); _I.new("RGB", (16, 8), (0, 255, 0)).save(os.path.join(inp, "mgr_identity.png"))
+            ff = _t.zeros((1, 8, 16, 3)); ff[..., 0] = 1.0
+            refs = json.dumps({"references": [{"kind": "image", "file": "mgr_identity.png"}]})
+            out = cls().build(direction="d", references_json=refs, prompt_provider="none", first_frame=ff)
+            ffs = [f for f in os.listdir(inp) if f.startswith("mmx_ff_")]
+            check("first_frame connected: written into input/ and used as <Picture 2> (debug says so)", len(ffs) == 1 and f"first_frame: {ffs[0]}" in out[19] and "used as <Picture 2>" in out[19] and out[1] is not None, out[19][-200:])
+            _I.new("RGB", (16, 8), (0, 0, 255)).save(os.path.join(inp, "mmx_chain_slot_test.png"))
+            refs2 = json.dumps({"references": [{"kind": "image", "file": "mgr_identity.png"}, {"kind": "image", "file": "mmx_chain_slot_test.png"}]})
+            out2 = cls().build(direction="d", references_json=refs2, prompt_provider="none", first_frame=ff * 0.5)
+            ffs2 = [f for f in os.listdir(inp) if f.startswith("mmx_ff_")]
+            check("static chain slot present: the run-time override is SKIPPED (no new mmx_ff file, debug says IGNORED, <Picture 2> is the slot file); has_chain_slot finds it",
+                  ffs2 == ffs and "first_frame input IGNORED" in out2[19] and "mmx_chain_slot_test.png is <Picture 2>" in out2[19] and float(out2[1][0, 0, 0, 2]) > 0.99 and mgr.has_chain_slot(refs2) == "mmx_chain_slot_test.png" and mgr.has_chain_slot(refs) is None, out2[19][-260:])
+        except ImportError as e:
+            print(f"skip first_frame build checks ({e})")
     else:
         print(f"skip References Manager checks ({mgr._REASON})")
 
@@ -380,6 +397,14 @@ def main():
               [e["segment"] for e in hist] == [2, 1] and all(e["thumb"] and os.path.isfile(os.path.join(CH.history_dir("gate_test"), e["thumb"])) for e in hist)
               and Image.open(os.path.join(CH.history_dir("gate_test"), hist[0]["thumb"])).size[0] <= 192 and hist[0]["name"].startswith("gate_test_002_") and "history: gate_test_002_" in r["ui"]["text"][0], str(hist))
         check("history naming: label strips a trailing _last, choices = latest + names newest first, next segment counts up", CH.label_of("mmx_chain_last.png") == "mmx_chain" and CH.choices("gate_test")[:2] == ["latest", hist[0]["name"]] and CH.next_segment("gate_test") == 3)
+        inj = CH.inject_slot("gate_test", hist[1]["name"], fp.get_input_directory())
+        inj_l = CH.inject_slot("gate_test", "latest", fp.get_input_directory())
+        try:
+            CH.inject_slot("gate_test", "gate_test_099_20200101-000000.png"); check("inject_slot of a missing frame raises", False)
+        except ValueError as e:
+            check("inject_slot: copies the chosen history frame / the latest into input/mmx_chain_slot_<chain>.png (same fixed name, so re-injecting never duplicates); a missing frame raises naming the fallback",
+                  inj["file"] == "mmx_chain_slot_gate_test.png" and inj_l["file"] == inj["file"] and os.path.isfile(inj_l["path"]) and open(inj_l["path"], "rb").read() == open(good, "rb").read()
+                  and "segment 1" in inj["source"] and inj_l["source"].startswith("latest") and "fallback" in str(e) and CH.is_slot_file(inj["file"]) and CH.slot_name("mmx_chain_last.png") == "mmx_chain_slot_mmx_chain.png", str(inj) + str(e))
         lcf = nodes.MMXLoadChainFrame()
         fb = torch.zeros((1, 64, 96, 3)); fb[..., 2] = 1.0
         r_hist = lcf.run(fb, "gate_test", False, use_frame=hist[1]["name"])       # segment 1 = the PASS frame (frames[-1])

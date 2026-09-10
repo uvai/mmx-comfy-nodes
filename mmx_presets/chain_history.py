@@ -145,6 +145,35 @@ def resolve(filename: str, use_frame: str | None) -> tuple:
     return None, f"no chain frame yet ({os.path.basename(p)} absent)", None
 
 
+SLOT_PREFIX = "mmx_chain_slot_"
+
+
+def is_slot_file(name) -> bool:
+    return isinstance(name, str) and name.startswith(SLOT_PREFIX) and name.lower().endswith(".png")
+
+
+def slot_name(filename: str) -> str:
+    """the fixed input/ name the static 'Inject into Manager as slot' path writes for this chain"""
+    return f"{SLOT_PREFIX}{label_of(filename)}.png"
+
+
+def inject_slot(filename: str, use_frame: str | None, dest_dir: str | None = None) -> dict:
+    """Copy the frame Load Chain Frame would open on (latest / a history entry) into
+    input/<slot_name> for a static References Manager slot. Raises when the loader would use
+    its fallback (no chain frame yet / unknown history frame)."""
+    p, why, entry = resolve(filename, use_frame)
+    if not p:
+        raise ValueError(f"no chain frame to inject — {why}; the loader would open on its fallback (inject that Library file with its own Inject button)")
+    d = dest_dir or input_dir()
+    os.makedirs(d, exist_ok=True)
+    name = slot_name(filename)
+    dst = os.path.join(d, name)
+    tmp = dst + ".part"
+    shutil.copy2(p, tmp)
+    os.replace(tmp, dst)
+    return {"file": name, "path": dst, "source": why, "entry": entry}
+
+
 def clear_history(filename: str) -> int:
     d = history_dir(filename)
     if not os.path.isdir(d):

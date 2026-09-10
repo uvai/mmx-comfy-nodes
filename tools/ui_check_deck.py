@@ -562,6 +562,46 @@ def main():
                  "written == run-1 frame": written is not None and same_image(written, frame_src), "written != run-3 frame": written is not None and not same_image(written, fetch_png(a.server, a.other_frame))}
         check("run 4 on segment 001: the loader opened on that frame (body 'history segment 1', ui image = its thumbnail), so the Manager's first_frame IS the frame the gate wrote in run 1 (--frame), not the latest (run 3 wrote --other-frame)",
               all(conds.values()), json.dumps(conds) + " " + json.dumps({k: v for k, v in r.items() if k in ("body", "imgs", "exported")})[:500])
+        # 8e. the ghost tile: the Manager shows the loader's current selection as "Picture N · first frame (wired)", follows the selection, hides when unlinked;
+        #     "Inject into Manager as slot" writes a static tile instead and switches the run-time override off while it is present
+        GHOST = """(ids) => { const M = app.graph.getNodeById(ids.M); const el = M.mmxGhost(); if (!el) return {visible: false};
+            const cv = M._mmrpBody.canvas; const img = el.querySelector('img');
+            return {visible: !el.hidden, text: el.innerText, src: img ? img.src.slice(img.src.indexOf('/view') >= 0 ? img.src.indexOf('/view') : img.src.indexOf('/mmx')) : null,
+                    left: parseFloat(el.style.left) - cv.offsetLeft, top: parseFloat(el.style.top) - cv.offsetTop, w: parseFloat(el.style.width), pe: getComputedStyle(el).pointerEvents, border: getComputedStyle(el).borderStyle}; }"""
+        gh = pg.evaluate(GHOST, g["ids"])
+        print("   ghost:", json.dumps(gh)[:400])
+        check("ghost tile: visible on the linked Manager after the identity tile (x = 233, tile row), labelled 'Picture 2 · first frame (wired)', showing segment 001's thumbnail (the loader's current pick), dashed + pointer-transparent",
+              gh.get("visible") and "Picture 2 · first frame (wired)" in gh["text"] and "segment 001" in gh["text"] and gh["src"] and "_001_" in gh["src"] and abs(gh["left"] - 233) < 2 and abs(gh["top"] - 38) < 2 and gh["w"] == 131 and gh["pe"] == "none" and gh["border"] == "dashed", json.dumps(gh)[:400])
+        gh = pg.evaluate("""async (ids) => { const C = app.graph.getNodeById(ids.C); const fw = C.widgets.find(w => w.name === 'use_frame'); fw.value = 'latest'; fw.callback?.('latest'); await new Promise(r => setTimeout(r, 1200));
+            const M = app.graph.getNodeById(ids.M); const el = M.mmxGhost(); const img = el && el.querySelector('img'); return {text: el && el.innerText, src: img && img.src.slice(img.src.indexOf('/view'))}; }""", g["ids"])
+        check("ghost follows the loader's selection: back on 'latest' it shows the fixed-name chain file", gh["text"] and "latest ·" in gh["text"] and gh["src"] and chain_name in gh["src"], json.dumps(gh)[:300])
+        gh = pg.evaluate("""async (ids) => { const M = app.graph.getNodeById(ids.M), C = app.graph.getNodeById(ids.C); const i = M.inputs.findIndex(x => x.name === 'first_frame');
+            M.disconnectInput(i); await new Promise(r => setTimeout(r, 300)); const off = !M.mmxGhost();
+            C.connect(0, M, i); await new Promise(r => setTimeout(r, 300)); const on = !!M.mmxGhost(); return {off, on}; }""", g["ids"])
+        check("ghost hides when first_frame is unlinked and returns when relinked", gh["off"] and gh["on"], str(gh))
+        r = pg.evaluate("""async (ids) => { const C = app.graph.getNodeById(ids.C), M = app.graph.getNodeById(ids.M);
+            await C.widgets.find(w => w.name.startsWith('⇢ Inject into Manager as slot')).callback(); await new Promise(r => setTimeout(r, 600));
+            const body = C.widgets.find(w => w.name === 'mmx_result')?.value;   // before the run rewrites it
+            const refs = window.mmx.getReferences(M); const p = await app.graphToPrompt(); const exported = p.output[String(ids.M)].inputs.references_json;
+            const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: (app.api && app.api.clientId) || 'ui-check'})});
+            const d = await res.json(); if (!res.ok) return {error: JSON.stringify(d).slice(0, 300)};
+            for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); const q = await (await fetch('/queue')).json(); if (!q.queue_running.length && !q.queue_pending.length) break; }
+            await new Promise(r => setTimeout(r, 800));
+            const h = await (await fetch('/history/' + d.prompt_id)).json(); const e = h[d.prompt_id]; const o = e.outputs || {};
+            return {body, refs: refs.map(x => x.file), exported, ghost: !!M.mmxGhost(), status: e.status && e.status.status_str, debug: ((o[String(ids.D)] || {}).text || [''])[0], tiles: M._mmrpRefs.images.map(x => x.file)}; }""", g["ids"])
+        print("   inject as slot:", json.dumps(r)[:500])
+        slot_file = "mmx_chain_slot_" + chain_name.replace(".png", "") + ".png"
+        check("Inject into Manager as slot: the loader copies its current chain frame to input/mmx_chain_slot_<chain>.png and it becomes the LAST picture tile (a real, injected tile); the ghost disappears",
+              "error" not in r and r["refs"] == [flat_a, slot_file] and r["tiles"] == [flat_a, slot_file] and not r["ghost"] and "<Picture 2>" in (r["body"] or "") and "override is OFF" in (r["body"] or ""), json.dumps(r)[:400])
+        check("with the static slot present the export carries NO mmx_ff_ marker and the run reports 'first_frame input IGNORED' — the two paths never both apply",
+              r.get("status") == "success" and "mmx_ff_" not in r["exported"] and slot_file in r["exported"] and "first_frame input IGNORED" in r["debug"] and f"{slot_file} is <Picture 2>" in r["debug"], r.get("debug", "")[-300:])
+        r = pg.evaluate("""async (ids) => { const C = app.graph.getNodeById(ids.C), M = app.graph.getNodeById(ids.M);
+            await C.widgets.find(w => w.name.startsWith('⇢ Inject into Manager as slot')).callback(); await new Promise(r => setTimeout(r, 600));
+            const again = window.mmx.getReferences(M).map(x => x.file);
+            window.mmx.clearReferenceSlot(M, 'Picture 2'); await new Promise(r => setTimeout(r, 400));
+            const p = await app.graphToPrompt(); return {again, refs: window.mmx.getReferences(M).map(x => x.file), ghost: !!M.mmxGhost(), exported: p.output[String(ids.M)].inputs.references_json}; }""", g["ids"])
+        check("injecting again replaces the same slot tile (never duplicates); deleting the tile brings the ghost and the run-time override (mmx_ff_ marker in the export) back",
+              r["again"] == [flat_a, slot_file] and r["refs"] == [flat_a] and r["ghost"] and "mmx_ff_" in r["exported"], json.dumps(r)[:300])
         r = pg.evaluate("""async (ids) => { const C = app.graph.getNodeById(ids.C); window.confirm = () => true; await C.widgets.find(w => w.name === '✕ Clear chain history').callback(); await new Promise(r => setTimeout(r, 500));
             return {values: C.widgets.find(w => w.name === 'use_frame').options.values, value: C.widgets.find(w => w.name === 'use_frame').value, body: C.widgets.find(w => w.name === 'mmx_result')?.value}; }""", g["ids"])
         hist2 = json.loads(urllib.request.urlopen(f"{a.server}/mmx/chain/history?filename={urllib.parse.quote(chain_name)}").read())

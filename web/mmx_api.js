@@ -17,6 +17,10 @@ export const CAPS = { image: 9, video: 3, audio: 3 };
 export const FIRST_FRAME_INPUT = "first_frame";
 export const FIRST_FRAME_PREFIX = "mmx_ff_";
 export const FIRST_FRAME_FILE = "(first_frame input)";
+// The static alternative: Load Chain Frame's "Inject into Manager as slot" copies the current
+// chain frame to input/mmx_chain_slot_<chain>.png and puts it in the last picture slot. While
+// such an entry is in references_json the run-time override (and its ghost tile) is OFF.
+export const CHAIN_SLOT_PREFIX = "mmx_chain_slot_";
 export const ROWS = 5;
 export const NONE = "(none)";
 
@@ -69,14 +73,28 @@ export function withFirstFrame(list, file) {
   others.splice(last + 1, 0, { kind: "image", file });
   return { list: others, replaced, slot: others.filter(r => r.kind === "image").length };
 }
+export function isChainSlotFile(f) { return typeof f === "string" && f.startsWith(CHAIN_SLOT_PREFIX) && f.toLowerCase().endsWith(".png"); }
+export function chainSlotEntry(list) { return list.find(r => r.kind === "image" && isChainSlotFile(r.file)) || null; }
+// the list with `file` as the LAST picture (an old chain-slot or mmx_ff_* entry is dropped first; the 9th is replaced when full)
+export function withChainSlot(list, file) {
+  const others = list.filter(r => !(r.kind === "image" && (isChainSlotFile(r.file) || isFirstFrameFile(r.file))));
+  const imgs = others.filter(r => r.kind === "image");
+  let replaced = null;
+  if (imgs.length >= CAPS.image) { replaced = imgs[imgs.length - 1]; others.splice(others.indexOf(replaced), 1); }
+  const last = others.map(r => r.kind).lastIndexOf("image");
+  others.splice(last + 1, 0, { kind: "image", file });
+  return { list: others, replaced, slot: others.filter(r => r.kind === "image").length };
+}
 export function exportFirstFrameName(node) { return `${FIRST_FRAME_PREFIX}${node.id}_${Date.now().toString(36)}.png`; }
 // what the run will see: the widget's list, plus the first-frame slot when the input is linked
 export function effectiveReferences(node, exportName) {
   const list = getReferences(node);
   const ff = firstFrameLink(node);
-  if (!ff) return { list, firstFrame: null };
+  if (!ff) return { list, firstFrame: null, chainSlot: chainSlotEntry(list) };
+  const slot = chainSlotEntry(list);
+  if (slot) return { list, firstFrame: null, chainSlot: slot, suppressed: ff };   // the static slot wins; the run-time override is skipped
   const r = withFirstFrame(list, exportName || FIRST_FRAME_FILE);
-  return { list: r.list, firstFrame: { ...ff, slot: r.slot, replaced: r.replaced } };
+  return { list: r.list, firstFrame: { ...ff, slot: r.slot, replaced: r.replaced }, chainSlot: null };
 }
 
 // The tag rule (minimax_refpack/refs.py assign_tags): <Picture n> over the images in order; per
@@ -299,6 +317,7 @@ window.mmx = {
   nodeById, findManagers, findStacks, findLibraries, defaultManager, defaultStack, remember, remembered,
   getReferences, setReferences, tagsOf, setReferenceSlot, clearReferenceSlot, parseSlot,
   FIRST_FRAME_INPUT, FIRST_FRAME_PREFIX, FIRST_FRAME_FILE, firstFrameLink, withFirstFrame, effectiveReferences, exportFirstFrameName, isFirstFrameFile,
+  CHAIN_SLOT_PREFIX, isChainSlotFile, chainSlotEntry, withChainSlot,
   getDirection, setDirection, refreshManager,
   getStack, setStack, describeStack, effectiveRows, registry, loadRegistry, triggersFor, loras, loadLoras, setLoraList, loraValues,
   jumpTo, highlight, injectLibrary, label,
