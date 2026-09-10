@@ -431,7 +431,7 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   slot** makes `mmx_chain_slot_<chain>.png` the last real tile, hides the ghost, the export has
   no `mmx_ff_` marker and the run says IGNORED, re-injecting replaces the same tile, deleting
   it restores the ghost and the marker.
-- 2026-09-10: `tests/test_pack.py` 127 (131 with the RefPack) and `ui_check_deck.py` 109/109 on the
+- 2026-09-10: `tests/test_pack.py` 125 (131 with the RefPack) and `ui_check_deck.py` 109/109 on the
   CPU ComfyUI 0.34 / frontend 1.51.9, classic + Nodes 2.0, populated and empty-library servers.
 - 2026-09-09: both run green on a CPU ComfyUI 0.34 / frontend 1.51.9 with the RefPack, rgthree,
   KJNodes, VHS and ComfyMath installed (no H3 weights, so the model loaders show the frontend's
@@ -508,7 +508,7 @@ lists the store. Batch runs from the studio and canvas runs therefore share one 
 ## Tests
 
 ```
-python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (127 checks; torch /
+python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (125 checks; torch /
                                # PIL / ffmpeg / RefPack dependent ones are skipped without them)
 python3 tools/ui_check_deck.py --server http://127.0.0.1:8188 --empty-server http://127.0.0.1:8189 --vue-too --shots /tmp/shots
                                # 109 playwright checks on deck.json + deck_chain.json (see Verification)
