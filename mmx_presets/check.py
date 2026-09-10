@@ -180,7 +180,9 @@ class MMXFirstFrameCheck:
         return {"required": {
             "images": ("IMAGE", {"tooltip": "decoded frames (VAE Decode); frame 0 is checked"}),
             "threshold_db": ("FLOAT", {"default": 24.0, "min": 0.0, "max": 100.0, "step": 0.5,
-                                       "tooltip": "PSNR at or above this passes. Guide continuations measure ~29-33 dB, a wrong reference < 20 dB."}),
+                                       "tooltip": "PSNR at or above this passes. Two regimes: with MiniMaxH3AddGuide pinning frame 0 expect ~24 dB and more "
+                                                  "(29-33 dB measured; a wrong reference < 20 dB); WITHOUT a guide (the first frame only as the last picture, "
+                                                  "as in deck.json / deck_chain.json) expect ~12-18 dB, so those examples ship 12 dB."}),
         }, "optional": {
             "reference": ("IMAGE", {"tooltip": "the intended first frame: the slot-9 image or the previous segment's last frame. Leave unconnected on a first segment: the check is skipped."}),
             "enabled": ("BOOLEAN", {"default": True, "label_on": "enabled", "label_off": "skipped",
@@ -252,8 +254,10 @@ def _wipe_pending_queue() -> int:
 
 class MMXChainGate:
     """When `passed`: write the LAST frame to ComfyUI/input/<filename> (overwrite) for the next
-    segment. When not: write <stem>_REJECTED.png instead, keep the previous good frame, clear the
-    pending queue and raise so the chain stops here."""
+    segment. When not — strict (the default, the pre-0.5 behaviour): write <stem>_REJECTED.png
+    instead, keep the previous good frame, clear the pending queue and raise so the chain stops
+    here; not strict: write <filename> anyway (the chain continues), keep the _REJECTED.png copy
+    alongside as evidence, never raise, and show the check's verdict in the body."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -262,7 +266,13 @@ class MMXChainGate:
             "passed": ("BOOLEAN", {"default": True, "forceInput": True, "tooltip": "from MMX First Frame Check"}),
             "filename": ("STRING", {"default": "mmx_chain_last.png", "tooltip": "written into ComfyUI/input; the next segment's LoadImage / MMX Load Chain Frame reads it"}),
         }, "optional": {
-            "stop_queue": ("BOOLEAN", {"default": True, "tooltip": "on failure also clear the pending queue (the remaining segments)"}),
+            "stop_queue": ("BOOLEAN", {"default": True, "tooltip": "strict only: on failure also clear the pending queue (the remaining segments)"}),
+            "strict": ("BOOLEAN", {"default": True, "label_on": "strict: fail stops the chain", "label_off": "lenient: always continue",
+                                   "tooltip": "on: a failed check writes _REJECTED.png only, keeps the previous frame and raises (stops the queue). "
+                                              "off: the frame is ALWAYS written under <filename> and nothing raises; a failed check also writes the "
+                                              "_REJECTED.png copy alongside so the evidence is kept. deck_chain.json ships off."}),
+            "psnr": ("FLOAT", {"default": -1.0, "forceInput": True, "tooltip": "wire the check's psnr to show its verdict in this node"}),
+            "ssim": ("FLOAT", {"default": -1.0, "forceInput": True, "tooltip": "wire the check's ssim to show its verdict in this node"}),
         }, "hidden": {"unique_id": "UNIQUE_ID"}}
 
     RETURN_TYPES = ("STRING", "BOOLEAN")
@@ -270,24 +280,33 @@ class MMXChainGate:
     FUNCTION = "run"
     OUTPUT_NODE = True
     CATEGORY = "mmx/chain"
-    DESCRIPTION = "Writes the last frame under a fixed name only when the first-frame check passed; a failure writes _REJECTED.png, keeps the old frame and stops the queue."
+    DESCRIPTION = ("Writes the last frame under a fixed name for the next segment. strict: only when the first-frame check passed (a failure writes "
+                   "_REJECTED.png, keeps the old frame, stops the queue and raises). lenient: always, with the _REJECTED.png copy kept as evidence on a fail.")
 
     @classmethod
     def IS_CHANGED(cls, **kw):
         return float("nan")
 
-    def run(self, images, passed, filename, stop_queue=True, unique_id=None):
+    def run(self, images, passed, filename, stop_queue=True, strict=True, psnr=-1.0, ssim=-1.0, unique_id=None):
         good, rejected = gate_paths(filename)
         last = images[-1]
+        verdict = ("PASS" if passed else "FAIL") + (f"  PSNR {float(psnr):.2f} dB" if psnr is not None and float(psnr) >= 0 else "") \
+                  + (f"  SSIM {float(ssim):.3f}" if ssim is not None and float(ssim) >= 0 else "")
         if passed:
             _write_png(last, good)
-            text = f"PASS -> wrote {good}"
-            print("[mmx-gate] " + text)
-            return {"ui": {"text": [text], "path": [good], "written": [True]}, "result": (good, True)}
+            text = f"check {verdict}\n-> wrote {good}"
+            print("[mmx-gate] " + text.replace("\n", " | "))
+            return {"ui": {"text": [text], "path": [good], "written": [True], "passed": [True]}, "result": (good, True)}
+        if not strict:
+            _write_png(last, rejected)
+            _write_png(last, good)
+            text = f"check {verdict}  (lenient: chain continues)\n-> wrote {good}\n-> evidence kept: {rejected}"
+            print("[mmx-gate] " + text.replace("\n", " | "))
+            return {"ui": {"text": [text], "path": [good], "written": [True], "passed": [False]}, "result": (good, True)}
         _write_png(last, rejected)
         kept = f"{good} kept from the previous segment" if os.path.isfile(good) else f"{good} not written (no previous frame)"
         dropped = _wipe_pending_queue() if stop_queue else 0
-        text = (f"FAIL -> wrote {rejected}; {kept}"
+        text = (f"check {verdict}  (strict)\nFAIL -> wrote {rejected}; {kept}"
                 + (f"; cleared {dropped} pending prompt(s)" if dropped else "; queue empty" if stop_queue else ""))
         print("[mmx-gate] " + text)
         _notify(unique_id, text)

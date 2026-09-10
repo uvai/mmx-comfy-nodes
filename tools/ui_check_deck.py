@@ -98,6 +98,7 @@ def main():
     ap.add_argument("--lib-a", default="Subjects/j/identity.png"); ap.add_argument("--lib-b", default="Sets/room/first_frame.png"); ap.add_argument("--lib-video", default="VideoRef/seg1.mp4")
     ap.add_argument("--empty-server", default="", help="a ComfyUI whose library mirror is EMPTY: both examples must load there with zero validation errors")
     ap.add_argument("--vue-too", action="store_true", help="repeat the layout checks with the frontend's Nodes 2.0 (Vue) mode on")
+    ap.add_argument("--other-frame", default="identity.png", help="an image in ComfyUI/input that differs from --frame (the lenient-gate fail case)")
     ap.add_argument("--input-dir", default="", help="ComfyUI/input on this host (only to delete the first_frame test's chain file afterwards)")
     a = ap.parse_args()
     shot = (lambda n: None) if not a.shots else (lambda n: pg.screenshot(path=os.path.join(a.shots, n + ".png")))
@@ -161,7 +162,7 @@ def main():
         check("Load Chain Frame #404: fallback <- Library #402, image -> Manager first_frame AND -> First Frame Check reference; LoadImage #300 gone; use_fallback on (one segment)",
               ff["ff"] == [404, 0] and ff["fallback"] == [402, 0] and ff["ref"] == [404, 0] and ff["gone300"] and dict(ff["lcWidgets"]).get("use_fallback") is True, str(ff))
         check("with first_frame linked and no pictures in the widget, the Deck counts the first frame as <Picture 1>", ff["tags"] == [["<Picture 1>", "(first_frame input)", True]], str(ff["tags"]))
-        check("First Frame Check #301: reference optional (shape 7), enabled widget true", dict((i[0], i[2]) for i in info["chk"]["inputs"]).get("reference") == 7 and dict(info["chk"]["widgets"]).get("enabled") is True and dict(info["chk"]["widgets"]).get("threshold_db") == 24, str(info["chk"]))
+        check("First Frame Check #301: reference optional (shape 7), enabled widget true, threshold 12 dB (unguided graph)", dict((i[0], i[2]) for i in info["chk"]["inputs"]).get("reference") == 7 and dict(info["chk"]["widgets"]).get("enabled") is True and dict(info["chk"]["widgets"]).get("threshold_db") == 12, str(info["chk"]))
         shot("deck_loaded")
 
         # 1b. layout: the panel fills the node at 400 / 700 / 1000 px, nothing clipped, then after a reload
@@ -456,11 +457,11 @@ def main():
             L.connect(0, C, 0); C.connect(0, M, M.inputs.findIndex(i => i.name === 'first_frame')); C.connect(0, K, K.inputs.findIndex(i => i.name === 'reference'));
             F.connect(0, K, 0); F.connect(0, G, 0); K.connect(2, G, 1);
             M.connect(1, P, 0); M.connect(19, D, 0); C.connect(1, B, 0);
-            return {ids: {M: M.id, K: K.id, G: G.id, D: D.id, B: B.id}, tags: window.mmx.tagsOf(M).tags.map(t => [t.tag, t.file])}; }""" % json.dumps(flat_a), [chain_name, a.lib_b, a.frame])
+            return {ids: {M: M.id, K: K.id, G: G.id, D: D.id, B: B.id, F: F.id}, tags: window.mmx.tagsOf(M).tags.map(t => [t.tag, t.file])}; }""" % json.dumps(flat_a), [chain_name, a.lib_b, a.frame])
         check("first_frame graph: identity in the widget + first_frame linked -> <Picture 1> identity, <Picture 2> first_frame", g["tags"] == [["<Picture 1>", flat_a], ["<Picture 2>", "(first_frame input)"]], str(g))
         RUN = """async (ids) => {
             const p = await app.graphToPrompt(); const exported = p.output[String(ids.M)].inputs.references_json;
-            const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: 'ui-check'})});
+            const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: (app.api && app.api.clientId) || 'ui-check'})});
             const d = await res.json(); if (!res.ok) return {error: JSON.stringify(d).slice(0, 600)};
             for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); const q = await (await fetch('/queue')).json(); if (!q.queue_running.length && !q.queue_pending.length) break; }
             await new Promise(r => setTimeout(r, 800));
@@ -484,6 +485,27 @@ def main():
             else:
                 check("run 2: Load Chain Frame read the gate's frame (from_file True); the written mmx_ff file IS that frame (not the fallback)", r["fromFile"] == "True" and written is not None and same_image(written, frame_src) and not same_image(written, lib_first), str(r["fromFile"]))
                 check("run 2: the First Frame Check compared the frames against the SAME image the Manager anchored (PSNR 100, identical)", r["chk"]["psnr"] == [100] and r["chk"]["passed"] == [True], str(r["chk"]["text"]))
+        r = pg.evaluate("""async ([ids, other]) => { const K = app.graph.getNodeById(ids.K), G = app.graph.getNodeById(ids.G), F = app.graph.getNodeById(ids.F);
+            F.widgets.find(w => w.name === 'image').value = other;   // frames that do NOT match the chain frame -> the check fails
+            K.widgets.find(w => w.name === 'threshold_db').value = 100; G.widgets.find(w => w.name === 'strict').value = false;
+            K.connect(0, G, G.inputs.findIndex(i => i.name === 'psnr')); K.connect(1, G, G.inputs.findIndex(i => i.name === 'ssim'));
+            const p = await app.graphToPrompt(); const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: (app.api && app.api.clientId) || 'ui-check'})});
+            const d = await res.json(); if (!res.ok) return {error: JSON.stringify(d).slice(0, 400)};
+            for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); const q = await (await fetch('/queue')).json(); if (!q.queue_running.length && !q.queue_pending.length) break; }
+            await new Promise(r => setTimeout(r, 800));
+            const h = await (await fetch('/history/' + d.prompt_id)).json(); const e = h[d.prompt_id]; const o = e.outputs || {};
+            await new Promise(r => setTimeout(r, 1200));
+            return {status: e.status && e.status.status_str, gate: o[String(ids.G)], gateInputs: p.output[String(ids.G)].inputs, body: G.widgets.find(w => w.name === 'mmx_result')?.value, widgets: G.widgets.map(w => w.name), color: G.bgcolor, chk: o[String(ids.K)]}; }""", [g["ids"], a.other_frame])
+        print("   lenient gate:", json.dumps(r)[:500])
+        rej = chain_name.replace(".png", "_REJECTED.png")
+        try:
+            rej_img, chain_img = fetch_png(a.server, rej), fetch_png(a.server, chain_name)
+        except Exception as ex:
+            rej_img = chain_img = None; print("   (could not fetch gate files:", ex, ")")
+        check("lenient gate (strict off, threshold 100 -> the check FAILS): the run succeeds (no raise), the chain frame is written anyway, the _REJECTED.png evidence is byte-identical alongside",
+              "error" not in r and r["status"] == "success" and r["gate"]["written"] == [True] and r["gate"]["passed"] == [False] and r["chk"]["passed"] == [False] and r["gateInputs"]["strict"] is False
+              and rej_img is not None and same_image(rej_img, chain_img), json.dumps(r)[:400])
+        check("lenient gate body shows the check's verdict (FAIL + PSNR + SSIM from the wired outputs) and the node turns red", "FAIL  PSNR" in (r.get("body") or "") and "SSIM" in (r.get("body") or "") and "evidence kept" in (r.get("body") or "") and r.get("color") == "#7a2a2a", str(r.get("body")) + str(r.get("color")))
         if a.input_dir:
             for f in (chain_name, chain_name.replace(".png", "_REJECTED.png")):
                 try: os.remove(os.path.join(a.input_dir, f))
@@ -527,7 +549,7 @@ def main():
                 check(f"{label}: the node body shows the empty library + the last mirror log line", all("library empty" in (x["body"] or "") and "last mirror log" in (x["body"] or "") for x in st["libs"]), str([x["body"] for x in st["libs"]])[:300])
                 check(f"{label}: MMX References Manager #185 with the RefPack body, 20 outputs, first_frame linked; Deck panel built" + ("; Chain Gate #406 present" if label.startswith("deck_chain") else ""),
                       st["mgr"] == {"type": "MMXReferencesManager", "body": True, "outputs": 20, "ff": True} and st["deckPanel"] and st["gate"] == label.startswith("deck_chain"), str(st["mgr"]))
-                q = pg2.evaluate("""async () => { const p = await app.graphToPrompt(); const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: 'ui-check'})});
+                q = pg2.evaluate("""async () => { const p = await app.graphToPrompt(); const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: (app.api && app.api.clientId) || 'ui-check'})});
                     const d = await res.json(); const ne = d.node_errors || {}; return Object.fromEntries(Object.entries(ne).map(([k, v]) => [k, [v.class_type, v.errors.map(e => e.type + ': ' + e.message + ' / ' + e.details)]])); }""")
                 mmx_errs = {k: v for k, v in q.items() if v[0].startswith("MMX")}
                 check(f"{label}: queueing reports the unset file ONLY as a lazy custom validation on #402 (wired into the chain) — no value_not_in_list on any MMX node, nothing on the unwired #401",

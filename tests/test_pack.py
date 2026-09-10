@@ -360,8 +360,18 @@ def main():
         try:
             gate.run(frames * 0.1, False, "gate_test"); check("ChainGate fail raises", False)
         except RuntimeError as e:
-            check("ChainGate fail: raises naming the REJECTED file, writes it, keeps the good frame byte-identical",
+            check("ChainGate strict fail (default): raises naming the REJECTED file, writes it, keeps the good frame byte-identical",
                   rejected in str(e) and "kept" in str(e) and os.path.isfile(rejected) and open(good, "rb").read() == before, str(e))
+        os.remove(rejected)
+        r = gate.run(frames * 0.1, False, "gate_test", strict=False, psnr=13.2, ssim=0.61)
+        after = open(good, "rb").read()
+        check("ChainGate lenient fail: no raise, the chain frame IS rewritten, the _REJECTED.png evidence is written alongside, body shows the check's verdict",
+              r["result"] == (good, True) and r["ui"]["passed"] == [False] and after != before and os.path.isfile(rejected) and open(rejected, "rb").read() == after
+              and "FAIL  PSNR 13.20 dB  SSIM 0.610" in r["ui"]["text"][0] and "lenient" in r["ui"]["text"][0] and rejected in r["ui"]["text"][0], str(r["ui"]["text"]))
+        r = gate.run(frames, True, "gate_test", strict=False, psnr=31.6, ssim=0.93)
+        check("ChainGate pass shows the verdict too; INPUT_TYPES: strict (default True = the old behaviour), psnr / ssim forceInput",
+              r["ui"]["passed"] == [True] and "PASS  PSNR 31.60 dB" in r["ui"]["text"][0] and chk.MMXChainGate.INPUT_TYPES()["optional"]["strict"][1]["default"] is True
+              and chk.MMXChainGate.INPUT_TYPES()["optional"]["psnr"][1]["forceInput"] and list(chk.MMXChainGate.INPUT_TYPES()["optional"]) == ["stop_queue", "strict", "psnr", "ssim"], str(r["ui"]["text"]))
         # library: image + video (ffmpeg) -> input copy, first frame, thumbs, refresh, sync trigger
         L = lib.root(); os.makedirs(os.path.join(L, "Subjects", "j"), exist_ok=True); os.makedirs(os.path.join(L, "VideoRef"), exist_ok=True)
         Image.fromarray((np.stack([np.full((48, 64), 255), np.zeros((48, 64)), np.zeros((48, 64))], -1)).astype(np.uint8)).save(os.path.join(L, "Subjects", "j", "red.png"))
@@ -462,10 +472,11 @@ def main():
         dangling = [l for l in w["links"] if not any(i.get("link") == l[0] for i in by[l[3]]["inputs"]) or l[0] not in [x for o in by[l[1]]["outputs"] for x in (o.get("links") or [])]]
         check(f"{name}: every link is referenced by its source output and target input", not dangling, str(dangling)[:200])
         if name == "deck_chain.json":
-            check("deck_chain.json: Chain Gate #406 <- decoded frames 133 + check passed 301:2; Load Chain Frame use_fallback false; deck.json true",
-                  src(406, "images") == (133, 0) and src(406, "passed") == (301, 2) and by[404]["widgets_values"] == ["mmx_chain_last.png", False] and by[406]["widgets_values"] == ["mmx_chain_last.png", True] and w["id"] == "mmx-deck-chain")
+            check("deck_chain.json: Chain Gate #406 <- decoded frames 133 + check passed/psnr/ssim; lenient (strict false); Load Chain Frame use_fallback false",
+                  src(406, "images") == (133, 0) and src(406, "passed") == (301, 2) and src(406, "psnr") == (301, 0) and src(406, "ssim") == (301, 1) and by[404]["widgets_values"] == ["mmx_chain_last.png", False] and by[406]["widgets_values"] == ["mmx_chain_last.png", True, False] and w["id"] == "mmx-deck-chain")
         else:
             check("deck.json: no Chain Gate, Load Chain Frame always uses the fallback (one segment)", 406 not in by and by[404]["widgets_values"] == ["mmx_chain_last.png", True] and w["id"] == "mmx-deck")
+        check(f"{name}: First Frame Check threshold 12 dB (no frame-0 guide in this graph), enabled", by[301]["widgets_values"] == [12.0, True], str(by[301]["widgets_values"]))
 
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} passed")

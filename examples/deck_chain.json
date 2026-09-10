@@ -2,7 +2,7 @@
  "id": "mmx-deck-chain",
  "revision": 0,
  "last_node_id": 406,
- "last_link_id": 426,
+ "last_link_id": 428,
  "nodes": [
   {
    "id": 115,
@@ -1704,13 +1704,17 @@
     {
      "name": "psnr",
      "type": "FLOAT",
-     "links": [],
+     "links": [
+      427
+     ],
      "slot_index": 0
     },
     {
      "name": "ssim",
      "type": "FLOAT",
-     "links": [],
+     "links": [
+      428
+     ],
      "slot_index": 1
     },
     {
@@ -1734,7 +1738,7 @@
     "Node name for S&R": "MMXFirstFrameCheck"
    },
    "widgets_values": [
-    24.0,
+    12.0,
     true
    ],
    "title": "MMX First Frame Check"
@@ -2004,7 +2008,7 @@
    ],
    "size": [
     360,
-    180
+    230
    ],
    "flags": {},
    "order": 13,
@@ -2019,6 +2023,16 @@
      "name": "passed",
      "type": "BOOLEAN",
      "link": 426
+    },
+    {
+     "name": "psnr",
+     "type": "FLOAT",
+     "link": 427
+    },
+    {
+     "name": "ssim",
+     "type": "FLOAT",
+     "link": 428
     }
    ],
    "outputs": [
@@ -2040,9 +2054,10 @@
    },
    "widgets_values": [
     "mmx_chain_last.png",
-    true
+    true,
+    false
    ],
-   "title": "MMX Chain Gate \u2192 next segment"
+   "title": "MMX Chain Gate \u2192 next segment (lenient)"
   }
  ],
  "links": [
@@ -2541,6 +2556,22 @@
    406,
    1,
    "BOOLEAN"
+  ],
+  [
+   427,
+   301,
+   0,
+   406,
+   2,
+   "FLOAT"
+  ],
+  [
+   428,
+   301,
+   1,
+   406,
+   3,
+   "FLOAT"
   ]
  ],
  "groups": [

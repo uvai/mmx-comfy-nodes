@@ -262,7 +262,7 @@ app.registerExtension({
       const text = Array.isArray(message?.text) ? message.text.join("\n") : (message?.text || "");
       let verdict;
       if (nodeData.name === "MMXFirstFrameCheck" && Array.isArray(message?.passed)) verdict = message?.skipped?.[0] ? "skip" : !!message.passed[0];
-      if (nodeData.name === "MMXChainGate") verdict = true;   // a failed gate raises instead of reporting
+      if (nodeData.name === "MMXChainGate") verdict = Array.isArray(message?.passed) ? !!message.passed[0] : true;   // strict fail raises instead (mmx-gate event)
       showResult(this, text, verdict);
     };
   },

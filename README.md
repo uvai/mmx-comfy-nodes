@@ -70,8 +70,11 @@ compares against that very image (`reference` ← #404; the manual LoadImage #30
 and #402 ship with `file` EMPTY — pick yours in the node; an unset file is only an error when the
 node is queued. `deck.json` keeps `use_fallback` on (one segment, always the library image).
 `examples/deck_chain.json` is the same graph with `use_fallback` off and **MMX Chain Gate #406**
-(images ← VAE Decode, passed ← the check) writing `mmx_chain_last.png`, so each queued run opens
-on the previous run's last frame and a failed check stops the queue.
+(images ← VAE Decode, passed / psnr / ssim ← the check, `strict` off) writing `mmx_chain_last.png`
+after every run, so each queued run opens on the previous run's last frame; a failed check keeps
+its `_REJECTED.png` evidence and shows the verdict in the gate, and the chain goes on (turn
+`strict` on to stop the queue instead). Both deck graphs have no frame-0 guide, so their First
+Frame Check ships at 12 dB — see the two regimes under "First-frame verification".
 
 **MMX Deck** — one DOM panel; its state (prompt, preset name, the five LoRA rows, the chosen
 target nodes) lives in four hidden widgets, so it rides in `widgets_values`.
@@ -219,8 +222,8 @@ RefPack found, Manager registered, store paths).
 | **MMX Sequence** | model, clip, index INT, strength_scale, preset_1..preset_8 | model, clip, prompt, preset_name, slot, count — empty slots skipped, index wraps over the filled ones |
 | **MMX Save Frame (fixed name)** | image, filename | writes the LAST image of the batch as `input/<filename>.png`, overwriting (OUTPUT_NODE) |
 | **MMX Load Chain Frame** | fallback IMAGE, filename, use_fallback | the saved frame when it exists, else the fallback; re-executes when the file changes |
-| **MMX First Frame Check** | images (VAE Decode batch), threshold_db (24), reference IMAGE (optional: slot-9 image or previous last frame), enabled | psnr FLOAT, ssim FLOAT, passed BOOLEAN, comparison IMAGE (reference \| frame 0 \| abs-diff heat-map, labelled); OUTPUT_NODE — numbers + PASS/FAIL shown in the node, strip previewed; no reference / disabled → skipped (passed=True, psnr=-1, comparison=frame 0) |
-| **MMX Chain Gate** | images, passed BOOLEAN, filename (`mmx_chain_last.png`), stop_queue | path STRING, written BOOLEAN. passed → writes the LAST frame to `input/<filename>` (overwrite). not passed → writes `<stem>_REJECTED.png`, leaves the previous good frame untouched, clears the pending queue and raises `MMX Chain Gate: first-frame check FAILED …` |
+| **MMX First Frame Check** | images (VAE Decode batch), threshold_db (node default 24 = guided; the unguided deck examples ship 12), reference IMAGE (optional: slot-9 image or previous last frame), enabled | psnr FLOAT, ssim FLOAT, passed BOOLEAN, comparison IMAGE (reference \| frame 0 \| abs-diff heat-map, labelled); OUTPUT_NODE — numbers + PASS/FAIL shown in the node, strip previewed; no reference / disabled → skipped (passed=True, psnr=-1, comparison=frame 0) |
+| **MMX Chain Gate** | images, passed BOOLEAN, filename (`mmx_chain_last.png`), stop_queue, strict (default on; `deck_chain.json` off), psnr / ssim FLOAT (optional, wire the check's) | path STRING, written BOOLEAN. passed → writes the LAST frame to `input/<filename>` (overwrite). not passed, strict → writes `<stem>_REJECTED.png`, leaves the previous good frame untouched, clears the pending queue and raises `MMX Chain Gate: first-frame check FAILED …`; not passed, lenient → writes `<filename>` anyway AND the `_REJECTED.png` copy, no raise. Body shows the check's verdict (PSNR / SSIM), red / green |
 | **MMX Library Image** | file (dropdown over `/workspace/mmx/library/{Subjects,VideoRef,Sets}/**`; first entry empty = nothing picked, an error only on queue), slot (`(none)` / Picture 1–9 / Video 1–3 / Audio 1 for Inject; the enum is the module's `SLOTS`, what the examples save) | image IMAGE (mp4: first frame), filename STRING (the file copied into `ComfyUI/input` as `Subjects__j__j1.jpg`, for the References Manager), path STRING |
 | **MMX References Builder** | image_1..9, video_1..3, audio_1 (STRING, optional), use_soundtrack | references_json STRING (exact `MiniMaxH3ReferencePack` schema, compacted in slot order), picture_map STRING (`slot 9 -> <Picture 5>`, `video 1 -> <Video 1> (+ soundtrack <Audio 1>)`) |
 
@@ -251,15 +254,27 @@ with an 11×11 σ=1.5 window. `passed = psnr >= threshold_db`. The comparison st
 the temp folder and previewed in the node; the abs-diff panel saturates at a mean per-pixel
 difference of 0.25.
 
-Calibration from the live joins (768×448, guide continuation): a correct reference measures
-29–33 dB, adjacent frames of one clip 22–28 dB, an unrelated image < 15 dB. 24 dB is the default
-threshold.
+**Two regimes for the threshold.** *Guided* — `MiniMaxH3AddGuide` pins the reference at frame 0
+(`chain_check.json`, the studio chain): from the live joins (768×448) a correct reference
+measures 29–33 dB, adjacent frames of one clip 22–28 dB, an unrelated image < 15 dB; **~24 dB**
+is the node's default and the right threshold there. *Unguided* — the first frame only reaches
+the model as the last picture with the "…is the absolute first frame" phrase (`deck.json`,
+`deck_chain.json`: the Manager's `first_frame` input, no AddGuide): the model re-renders the
+frame rather than copying it, so expect **~12–18 dB** for a faithful open and treat < 10 dB as
+a wrong or ignored reference. The unguided examples therefore ship `threshold_db = 12`; raise it
+once you have your own numbers from the check's body (it prints PSNR / SSIM every run).
 
-`MMX Chain Gate` takes that `passed` flag: only a passing segment overwrites `input/<filename>`
-(the frame `MMX Load Chain Frame` / `LoadImage` reads for the next segment). A failing segment
-writes `<stem>_REJECTED.png` for inspection, keeps the previous good frame byte-identical, clears
-the pending queue (`stop_queue`, default on — the remaining segments would otherwise run from the
-stale frame) and raises with the paths in the message; the node body shows the verdict either
+`MMX Chain Gate` takes that `passed` flag and has two modes (`strict`). **Strict** (the node's
+default, the pre-0.5 behaviour, `chain_check.json`): only a passing segment overwrites
+`input/<filename>` (the frame `MMX Load Chain Frame` / `LoadImage` reads for the next segment).
+A failing segment writes `<stem>_REJECTED.png` for inspection, keeps the previous good frame
+byte-identical, clears the pending queue (`stop_queue`, default on — the remaining segments would
+otherwise run from the stale frame) and raises with the paths in the message. **Lenient**
+(`strict` off, what `deck_chain.json` ships): the frame is ALWAYS written under `<filename>` and
+nothing raises, so the chain continues; a failed check additionally writes the `_REJECTED.png`
+copy alongside so the evidence is kept. In both modes wire the check's `psnr` / `ssim` into the
+gate's optional inputs and its body shows the verdict ("check FAIL  PSNR 13.20 dB  SSIM 0.610 …",
+red on a fail, green on a pass); the node body shows the verdict either
 way (a websocket event carries it before the exception aborts the node's normal ui output).
 
 ## Library (MMX Library Image)
@@ -324,7 +339,7 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   presets, delete tombstones surviving a NAS pull, the phrase store (seed, add / delete / bulk
   replace, mirror round trip, re-seed after a local loss keeping deletions), the LoRA Stack,
   the Deck passthrough, the Manager subclass + key fallback, the check's skip path and inject.
-- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR] [--empty-server http://HOST2:8188] [--vue-too] [--loras-dir …/models/loras --library-dir …/mmx/library]` — 89 frontend checks
+- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR] [--empty-server http://HOST2:8188] [--vue-too] [--loras-dir …/models/loras --library-dir …/mmx/library]` — 91 frontend checks
   (playwright chromium) on `examples/deck.json`: no missing types; the stack took over #137's
   links with the turbo LoRA untouched; tag buttons follow the Manager's slots; Inject / Clear
   slot / Inject all land in the Manager's slot UI (tiles) and are reported honestly; Send lands
@@ -355,8 +370,11 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   `deck.json` and `deck_chain.json` load as shipped with no validation toast, no console error
   about the pack, `file = ''` / the shipped slot inside their dropdowns, the body showing the
   mirror log, and queueing reports the unset file only as the lazy custom check on the wired
-  #402 (never `value_not_in_list`, nothing on the unwired #401).
-- 2026-09-10: `tests/test_pack.py` 106 (110 with the RefPack) and `ui_check_deck.py` 89/89 on the
+  #402 (never `value_not_in_list`, nothing on the unwired #401); the **lenient gate**: with
+  `strict` off and a failing check (threshold 100 against different frames) the run succeeds,
+  the chain frame is written anyway, the `_REJECTED.png` copy is byte-identical alongside, the
+  gate body shows "check FAIL  PSNR … SSIM …" and the node turns red.
+- 2026-09-10: `tests/test_pack.py` 110 (114 with the RefPack) and `ui_check_deck.py` 91/91 on the
   CPU ComfyUI 0.34 / frontend 1.51.9, classic + Nodes 2.0, populated and empty-library servers.
 - 2026-09-09: both run green on a CPU ComfyUI 0.34 / frontend 1.51.9 with the RefPack, rgthree,
   KJNodes, VHS and ComfyMath installed (no H3 weights, so the model loaders show the frontend's
@@ -433,8 +451,8 @@ lists the store. Batch runs from the studio and canvas runs therefore share one 
 ## Tests
 
 ```
-python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (106 checks; torch /
+python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (110 checks; torch /
                                # PIL / ffmpeg / RefPack dependent ones are skipped without them)
 python3 tools/ui_check_deck.py --server http://127.0.0.1:8188 --empty-server http://127.0.0.1:8189 --vue-too --shots /tmp/shots
-                               # 89 playwright checks on deck.json + deck_chain.json (see Verification)
+                               # 91 playwright checks on deck.json + deck_chain.json (see Verification)
 ```

@@ -34,6 +34,7 @@ OUT_CHAIN = os.path.join(ROOT, "examples", "deck_chain.json")
 ROWS = 5
 LORAS = ["H3_Motion_BoosterV2.safetensors"]     # row 1 of the stack; edit in the node / send from the Deck
 CHAIN_FILE = "mmx_chain_last.png"
+THRESHOLD_UNGUIDED = 12.0      # First Frame Check threshold without a frame-0 guide (with MiniMaxH3AddGuide use ~24)
 
 
 def library_enums():
@@ -85,7 +86,7 @@ def build(base: dict) -> dict:
     # 2. First Frame Check: enabled toggle, reference optional
     chk = nodes[301]
     assert chk["type"] == "MMXFirstFrameCheck"
-    chk["widgets_values"] = [float(chk["widgets_values"][0]) if chk.get("widgets_values") else 24.0, True]
+    chk["widgets_values"] = [THRESHOLD_UNGUIDED, True]   # no AddGuide in this graph: ~12-18 dB expected, see README
     chk["size"] = [360, 230]
     for i in chk["inputs"]:
         if i["name"] == "reference":
@@ -182,15 +183,17 @@ def build_chain(deck: dict) -> dict:
     lc["widgets_values"] = [CHAIN_FILE, False]
     lc["title"] = "MMX Load Chain Frame → Manager first_frame (chain)"
     lid = w["last_link_id"]
-    l_gi, l_gp = lid + 1, lid + 2
-    gate = {"id": 406, "type": "MMXChainGate", "pos": [chk["pos"][0], chk["pos"][1] + chk["size"][1] + 40], "size": [360, 180], "flags": {}, "order": 13, "mode": 0,
-            "inputs": [{"name": "images", "type": "IMAGE", "link": l_gi}, {"name": "passed", "type": "BOOLEAN", "link": l_gp}],
+    l_gi, l_gp, l_ps, l_ss = lid + 1, lid + 2, lid + 3, lid + 4
+    # lenient by default (strict = false): every run writes the chain frame, a failed check keeps its _REJECTED.png evidence
+    gate = {"id": 406, "type": "MMXChainGate", "pos": [chk["pos"][0], chk["pos"][1] + chk["size"][1] + 40], "size": [360, 230], "flags": {}, "order": 13, "mode": 0,
+            "inputs": [{"name": "images", "type": "IMAGE", "link": l_gi}, {"name": "passed", "type": "BOOLEAN", "link": l_gp},
+                       {"name": "psnr", "type": "FLOAT", "link": l_ps}, {"name": "ssim", "type": "FLOAT", "link": l_ss}],
             "outputs": [{"name": "path", "type": "STRING", "links": [], "slot_index": 0}, {"name": "written", "type": "BOOLEAN", "links": [], "slot_index": 1}],
-            "properties": {"Node name for S&R": "MMXChainGate"}, "widgets_values": [CHAIN_FILE, True], "title": "MMX Chain Gate → next segment"}
+            "properties": {"Node name for S&R": "MMXChainGate"}, "widgets_values": [CHAIN_FILE, True, False], "title": "MMX Chain Gate → next segment (lenient)"}
     dec["outputs"][0]["links"].append(l_gi)
-    chk["outputs"][2]["links"] = [l_gp]
-    w["links"] += [[l_gi, 133, 0, 406, 0, "IMAGE"], [l_gp, 301, 2, 406, 1, "BOOLEAN"]]
-    w["last_link_id"] = l_gp
+    chk["outputs"][0]["links"] = [l_ps]; chk["outputs"][1]["links"] = [l_ss]; chk["outputs"][2]["links"] = [l_gp]
+    w["links"] += [[l_gi, 133, 0, 406, 0, "IMAGE"], [l_gp, 301, 2, 406, 1, "BOOLEAN"], [l_ps, 301, 0, 406, 2, "FLOAT"], [l_ss, 301, 1, 406, 3, "FLOAT"]]
+    w["last_link_id"] = l_ss
     w["nodes"].append(gate)
     w["last_node_id"] = max(w["last_node_id"], 406)
     w["id"] = "mmx-deck-chain"
