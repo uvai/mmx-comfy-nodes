@@ -1,8 +1,8 @@
 {
  "id": "mmx-chain-check",
  "revision": 0,
- "last_node_id": 321,
- "last_link_id": 47,
+ "last_node_id": 322,
+ "last_link_id": 48,
  "nodes": [
   {
    "id": 119,
@@ -1437,7 +1437,7 @@
    ],
    "size": [
     360,
-    168
+    144
    ],
    "flags": {},
    "order": 0,
@@ -1469,8 +1469,7 @@
     "Node name for S&R": "MMXLibraryImage"
    },
    "widgets_values": [
-    "Subjects/j/identity.png",
-    "(none)"
+    "Subjects/j/identity.png"
    ],
    "title": "MMX Library Image \u2014 identity (<Picture 1>)"
   },
@@ -1483,7 +1482,7 @@
    ],
    "size": [
     360,
-    168
+    144
    ],
    "flags": {},
    "order": 0,
@@ -1517,8 +1516,7 @@
     "Node name for S&R": "MMXLibraryImage"
    },
    "widgets_values": [
-    "Sets/room/first_frame.png",
-    "(none)"
+    "Sets/room/first_frame.png"
    ],
    "title": "MMX Library Image \u2014 first frame (slot 9)"
   },
@@ -1654,7 +1652,7 @@
    ],
    "size": [
     360,
-    216
+    192
    ],
    "flags": {},
    "order": 9,
@@ -1695,7 +1693,9 @@
     {
      "name": "comparison",
      "type": "IMAGE",
-     "links": [],
+     "links": [
+      48
+     ],
      "slot_index": 3
     }
    ],
@@ -1703,8 +1703,7 @@
     "Node name for S&R": "MMXFirstFrameCheck"
    },
    "widgets_values": [
-    24.0,
-    true
+    24.0
    ],
    "title": "MMX First Frame Check"
   },
@@ -1756,6 +1755,40 @@
     true
    ],
    "title": "MMX Chain Gate -> next segment"
+  },
+  {
+   "id": 322,
+   "type": "PreviewImage",
+   "pos": [
+    4280,
+    600
+   ],
+   "size": [
+    360,
+    144
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 48
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PreviewImage"
+   },
+   "title": "first-frame comparison (reference | frame 0 | diff)"
   }
  ],
  "links": [
@@ -2134,6 +2167,14 @@
    321,
    1,
    "BOOLEAN"
+  ],
+  [
+   48,
+   320,
+   3,
+   322,
+   0,
+   "IMAGE"
   ]
  ],
  "groups": [],

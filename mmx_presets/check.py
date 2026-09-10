@@ -12,7 +12,7 @@ alone, clears the pending queue and raises.
 """
 from __future__ import annotations
 
-import math, os, time
+import math, os, random, time
 
 import numpy as np
 import torch
@@ -156,17 +156,27 @@ def comparison_strip(ref: torch.Tensor, frame: torch.Tensor, psnr_db: float, ssi
     return torch.from_numpy(np.ascontiguousarray(strip))[None, ...]
 
 
+_PREVIEW_SUFFIX = "_temp_" + "".join(random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(5))
+
+
 def _save_preview(image: torch.Tensor, prefix: str) -> list:
-    """Write an IMAGE to ComfyUI's temp dir so it shows up in the node like a PreviewImage."""
+    """Write an IMAGE into ComfyUI's temp dir EXACTLY the way core PreviewImage does
+    (folder_paths.get_save_image_path with a per-process random suffix, `<prefix>_<counter>_.png`,
+    type "temp") and return the ui.images entries the frontend's standard preview path renders."""
     if folder_paths is None:
         return []
     from PIL import Image
     d = folder_paths.get_temp_directory()
     os.makedirs(d, exist_ok=True)
-    name = f"{prefix}_{int(time.time() * 1000) % 100000000:08d}.png"
     arr = (image[0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-    Image.fromarray(arr).save(os.path.join(d, name), compress_level=1)
-    return [{"filename": name, "subfolder": "", "type": "temp"}]
+    h, w = arr.shape[0], arr.shape[1]
+    if hasattr(folder_paths, "get_save_image_path"):
+        full, filename, counter, subfolder, _ = folder_paths.get_save_image_path(prefix + _PREVIEW_SUFFIX, d, w, h)
+        name = f"{filename}_{counter:05}_.png"
+    else:   # unit tests stub folder_paths without it
+        full, subfolder, name = d, "", f"{prefix}_{int(time.time() * 1000) % 100000000:08d}.png"
+    Image.fromarray(arr).save(os.path.join(full, name), compress_level=1)
+    return [{"filename": name, "subfolder": subfolder, "type": "temp"}]
 
 
 # ── nodes ────────────────────────────────────────────────────────────────────

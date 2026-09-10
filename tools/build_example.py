@@ -82,6 +82,7 @@ def build_check_api(template: dict) -> dict:
                 "inputs": {"images": ["133", 0], "reference": ["303", 0], "threshold_db": THRESHOLD_DB}}
     p["321"] = {"class_type": "MMXChainGate", "_meta": {"title": "MMX Chain Gate -> next segment"},
                 "inputs": {"images": ["133", 0], "passed": ["320", 2], "filename": CHAIN_FILE, "stop_queue": True}}
+    p["322"] = {"class_type": "PreviewImage", "_meta": {"title": "first-frame comparison (reference | frame 0 | diff)"}, "inputs": {"images": ["320", 3]}}
     return p
 
 

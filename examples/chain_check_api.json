@@ -609,5 +609,17 @@
    "filename": "mmx_chain_last.png",
    "stop_queue": true
   }
+ },
+ "322": {
+  "class_type": "PreviewImage",
+  "_meta": {
+   "title": "first-frame comparison (reference | frame 0 | diff)"
+  },
+  "inputs": {
+   "images": [
+    "320",
+    3
+   ]
+  }
  }
 }

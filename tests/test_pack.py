@@ -345,7 +345,12 @@ def main():
         # the same image comes back > 50 dB, not 100: the guide geometry re-samples through 8-bit lanczos like AddGuide
         check("FirstFrameCheck: same image passes (> 50 dB, passed True), random fails; strip is reference|frame|diff wide",
               r_ok["result"][2] is True and r_ok["result"][0] > 50 and r_bad["result"][2] is False and r_bad["result"][0] < 24 and tuple(r_ok["result"][3].shape) == (1, 64, 96 * 3 + 12, 3), f"{r_ok['result'][:3]} {r_bad['result'][:3]}")
-        check("FirstFrameCheck ui: text PASS/FAIL + preview image in temp", r_ok["ui"]["text"][0].startswith("PASS") and r_bad["ui"]["text"][0].startswith("FAIL") and r_ok["ui"]["passed"] == [True] and os.path.isfile(os.path.join(fp.get_temp_directory(), r_ok["ui"]["images"][0]["filename"])))
+        check("FirstFrameCheck ui: text PASS/FAIL + preview image in temp (ui.images entry: filename / subfolder / type temp, like PreviewImage)", r_ok["ui"]["text"][0].startswith("PASS") and r_bad["ui"]["text"][0].startswith("FAIL") and r_ok["ui"]["passed"] == [True]
+              and set(r_ok["ui"]["images"][0]) == {"filename", "subfolder", "type"} and r_ok["ui"]["images"][0]["type"] == "temp" and os.path.isfile(os.path.join(fp.get_temp_directory(), r_ok["ui"]["images"][0]["subfolder"], r_ok["ui"]["images"][0]["filename"])))
+        fp.get_save_image_path = lambda prefix, d, w, h: (d, os.path.basename(prefix), 7, "", prefix)   # the real one's shape
+        r_named = chk._save_preview(a, "mmx_check")
+        check("_save_preview goes through folder_paths.get_save_image_path like PreviewImage: mmx_check_temp_<rand>_00007_.png", r_named[0]["filename"].startswith("mmx_check_temp_") and r_named[0]["filename"].endswith("_00007_.png") and os.path.isfile(os.path.join(fp.get_temp_directory(), r_named[0]["filename"])), str(r_named))
+        del fp.get_save_image_path
         r_skip = node.run(frames, 24.0, reference=None, enabled=True)
         r_off = node.run(frames, 24.0, reference=a, enabled=False)
         check("FirstFrameCheck skips with no reference / disabled: passed=True, psnr=-1, comparison=frame 0, body says skipped (first segment)",
@@ -481,7 +486,7 @@ def main():
 
     # shipped examples: both deck builds carry exactly what the nodes validate
     lib_mod = importlib.import_module("mmx_presets.library")
-    for name in ("deck.json", "deck_chain.json"):
+    for name in ("deck.json", "deck_chain.json", "deck_chain_guided.json"):
         path = os.path.join(ROOT, "examples", name)
         w = json.load(open(path)); raw = open(path).read()
         by = {n["id"]: n for n in w["nodes"]}
@@ -494,12 +499,21 @@ def main():
               by[185]["type"] == "MMXReferencesManager" and src(185, "first_frame") == (404, 0) and src(404, "fallback") == (402, 0) and src(301, "reference") == (404, 0) and 300 not in by, str((src(185, "first_frame"), src(404, "fallback"), src(301, "reference"))))
         dangling = [l for l in w["links"] if not any(i.get("link") == l[0] for i in by[l[3]]["inputs"]) or l[0] not in [x for o in by[l[1]]["outputs"] for x in (o.get("links") or [])]]
         check(f"{name}: every link is referenced by its source output and target input", not dangling, str(dangling)[:200])
-        if name == "deck_chain.json":
+        comp = [links[x][3] for x in by[301]["outputs"][3]["links"]]
+        check(f"{name}: a PreviewImage sits on the check's comparison output", any(by[t]["type"] == "PreviewImage" for t in comp), str(comp))
+        if name == "deck_chain_guided.json":
+            check("deck_chain_guided.json: MiniMaxH3AddGuide #407 takes R2V positive/latent + video VAE + the Load Chain Frame image (frame 0) and feeds the BasicGuider; threshold 20",
+                  by[407]["type"] == "MiniMaxH3AddGuide" and src(407, "positive") == (184, 0) and src(407, "latent") == (184, 1) and src(407, "vae") == (121, 0) and src(407, "image") == (404, 0)
+                  and src(149, "conditioning") == (407, 0) and by[407]["widgets_values"] == [0] and by[301]["widgets_values"] == [20.0, True] and by[406]["widgets_values"] == ["mmx_chain_last.png", True, False] and w["id"] == "mmx-deck-chain-guided", str((src(407, "image"), src(149, "conditioning"), by[301]["widgets_values"])))
+        elif name == "deck_chain.json":
             check("deck_chain.json: Chain Gate #406 <- decoded frames 133 + check passed/psnr/ssim; lenient (strict false); Load Chain Frame use_fallback false",
                   src(406, "images") == (133, 0) and src(406, "passed") == (301, 2) and src(406, "psnr") == (301, 0) and src(406, "ssim") == (301, 1) and by[404]["widgets_values"] == ["mmx_chain_last.png", False, "latest"] and by[406]["widgets_values"] == ["mmx_chain_last.png", True, False] and w["id"] == "mmx-deck-chain")
         else:
             check("deck.json: no Chain Gate, Load Chain Frame always uses the fallback (one segment)", 406 not in by and by[404]["widgets_values"] == ["mmx_chain_last.png", True, "latest"] and w["id"] == "mmx-deck")
-        check(f"{name}: First Frame Check threshold 12 dB (no frame-0 guide in this graph), enabled; Load Chain Frame use_frame = latest", by[301]["widgets_values"] == [12.0, True] and by[404]["widgets_values"][2] == "latest", str(by[301]["widgets_values"]))
+        if name != "deck_chain_guided.json":
+            check(f"{name}: First Frame Check threshold 12 dB (no frame-0 guide in this graph), enabled; Load Chain Frame use_frame = latest", by[301]["widgets_values"] == [12.0, True] and by[404]["widgets_values"][2] == "latest", str(by[301]["widgets_values"]))
+    cc = json.load(open(os.path.join(ROOT, "examples", "chain_check.json"))); ccl = {l[0]: l for l in cc["links"]}; ccb = {n["id"]: n for n in cc["nodes"]}
+    check("chain_check.json: PreviewImage #322 on the check's comparison; threshold stays 24 (guided by AddGuide)", ccb[322]["type"] == "PreviewImage" and any(ccl[x][3] == 322 for x in ccb[320]["outputs"][3]["links"]) and ccb[320]["widgets_values"][0] == 24.0, str(ccb[320]["widgets_values"]))
 
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} passed")

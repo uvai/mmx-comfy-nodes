@@ -26,7 +26,9 @@ function resultWidget(node) {
   } catch (e) {
     w = node.addWidget("text", "mmx_result", "", () => {}, {}); w.disabled = true;
   }
-  w.serialize = false; w.options = { ...(w.options || {}), serialize: false };
+  // a short read-only box: capped height so the node's free space stays with the frontend's own
+  // image preview (ui.images — the check's comparison strip, the loader's frame, a library thumb)
+  w.serialize = false; w.options = { ...(w.options || {}), serialize: false, getMinHeight: () => 56, getMaxHeight: () => 110 };
   node.setSize([Math.max(node.size[0], 360), Math.max(node.size[1], node.computeSize()[1])]);
   return w;
 }
@@ -331,6 +333,8 @@ app.registerExtension({
       if (nodeData.name === "MMXFirstFrameCheck" && Array.isArray(message?.passed)) verdict = message?.skipped?.[0] ? "skip" : !!message.passed[0];
       if (nodeData.name === "MMXChainGate") verdict = Array.isArray(message?.passed) ? !!message.passed[0] : true;   // strict fail raises instead (mmx-gate event)
       showResult(this, text, verdict);
+      // ui.images ride the frontend's standard preview path (same files/shape as core PreviewImage); make room for them
+      if (Array.isArray(message?.images) && message.images.length) { try { this.setSizeForImage?.(); } catch (e) {} this.setDirtyCanvas(true, true); }
       if (nodeData.name === "MMXChainGate" || nodeData.name === "MMXSaveFrame") setTimeout(refreshAllChainNodes, 300);   // a new history entry: every loader's list
       if (nodeData.name === "MMXLoadChainFrame") setTimeout(() => refreshChainFrames(this, true), 300);
     };

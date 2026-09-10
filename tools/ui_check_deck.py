@@ -23,6 +23,27 @@ from playwright.sync_api import sync_playwright
 HERE = os.path.dirname(os.path.abspath(__file__))
 EX = os.path.join(os.path.dirname(HERE), "examples", "deck.json")
 EX_CHAIN = os.path.join(os.path.dirname(HERE), "examples", "deck_chain.json")
+EX_GUIDED = os.path.join(os.path.dirname(HERE), "examples", "deck_chain_guided.json")
+EX_CHECK = os.path.join(os.path.dirname(HERE), "examples", "chain_check.json")
+JS_CHECK_RUN = """async (frame) => {
+    app.graph.clear();
+    const mk = (t, x, y) => { const n = LiteGraph.createNode(t); n.pos = [x, y]; app.graph.add(n); return n; };
+    const a = mk('LoadImage', 50, 50), c = mk('MMXFirstFrameCheck', 500, 50), b = mk('LoadImage', 50, 400);
+    a.widgets.find(w => w.name === 'image').value = frame; b.widgets.find(w => w.name === 'image').value = frame;
+    a.connect(0, c, 0); b.connect(0, c, c.inputs.findIndex(i => i.name === 'reference'));
+    const p = await app.graphToPrompt(); const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: (app.api && app.api.clientId) || 'ui-check'})});
+    const d = await res.json(); if (!res.ok) return {error: JSON.stringify(d).slice(0, 300)};
+    for (let i = 0; i < 120; i++) { await new Promise(r => setTimeout(r, 1000)); const s = await (await fetch('/queue')).json(); if (!s.queue_running.length && !s.queue_pending.length) break; }
+    await new Promise(r => setTimeout(r, 2500));
+    app.canvas.ds.scale = 1; app.canvas.centerOnNode(c); app.canvas.setDirty(true, true); await new Promise(r => setTimeout(r, 800));
+    const h = await (await fetch('/history/' + d.prompt_id)).json(); const out = h[d.prompt_id].outputs[String(c.id)] || {};
+    const host = document.querySelector('[data-node-id="' + c.id + '"]');
+    const imgs = host ? [...host.querySelectorAll('img')].map(i => [i.src.slice(i.src.indexOf('/view')), i.clientWidth, i.clientHeight]) : [];
+    const isPreview = w => /image|preview/i.test(w.name || '') || /image|preview/i.test(w.type || '');
+    const widgetsBottom = Math.max(0, ...(c.widgets || []).filter(w => !isPreview(w)).map(w => (w.y || 0) + (w.computedHeight || w.computeSize?.(c.size[0])?.[1] || LiteGraph.NODE_WIDGET_HEIGHT)));
+    const pw = (c.widgets || []).find(isPreview);
+    return {vue: !!LiteGraph.vueNodesMode, id: c.id, uiImages: out.images, nodeImgs: (c.imgs || []).length, imgLoaded: !!(c.imgs && c.imgs[0] && c.imgs[0].naturalWidth), size: c.size.slice(), widgetsBottom, domImgs: imgs,
+            previewWidget: !!pw, previewH: pw ? (pw.computedHeight || (c.size[1] - (pw.y || 0))) : 0}; }"""
 results = []
 
 WIDTHS = (400, 700, 1000)
@@ -184,6 +205,11 @@ def main():
                 g = pg.evaluate(JS_LAYOUT)
                 check("Vue mode, after a reload: panel fills the node, content fits, strength inputs + toolbar visible", layout_ok(g, g["size"][0]), json.dumps(g))
                 shot("deck_layout_vue_reload")
+                r = pg.evaluate(JS_CHECK_RUN, a.frame)
+                print("   vue check strip:", json.dumps(r)[:400])
+                check("Nodes 2.0: the check's comparison strip renders IN the node through ui.images (an <img> of the mmx_check temp file with a real size) next to the text body",
+                      "error" not in r and r["uiImages"] and any("mmx_check" in u and cw > 40 and ch > 20 for u, cw, ch in r["domImgs"]), json.dumps(r)[:400])
+                shot("check_strip_vue")
             finally:
                 urllib.request.urlopen(urllib.request.Request(a.server + "/settings/Comfy.VueNodes.Enabled", data=b"false", method="POST")).read()
             pg.goto(a.server); pg.wait_for_function("() => window.app && window.app.graph && Object.keys(LiteGraph.registered_node_types).length > 100", timeout=180000); time.sleep(2)
@@ -411,6 +437,11 @@ def main():
                 const pout = last && last.outputs && last.outputs[String(p.id)];
                 return {text: c.widgets.find(w => w.name === 'mmx_result')?.value, color: c.bgcolor, status: last && last.status && last.status.status_str, out, previewImgs: (pout && pout.images || []).length};
             }""", [a.frame, with_ref, enabled])
+        r = pg.evaluate(JS_CHECK_RUN, a.frame)
+        print("   classic check strip:", json.dumps(r)[:400])
+        check("classic canvas: the check's ui.images entry has PreviewImage's shape (mmx_check_temp_…_00001_.png, type temp); the frontend's own image-preview widget holds the loaded strip with ≥ 100 px below the text body",
+              "error" not in r and r["uiImages"] and r["uiImages"][0]["type"] == "temp" and "_temp_" in r["uiImages"][0]["filename"] and r["nodeImgs"] >= 1 and r["imgLoaded"] and r["previewWidget"] and r["previewH"] >= 100 and r["size"][1] - r["widgetsBottom"] >= 100, json.dumps(r)[:400])
+        shot("check_strip_classic")
         r = run_check(False, True)
         print("   check no-ref:", json.dumps(r)[:400])
         check("no reference connected: run succeeds, body says skipped (first segment), passed=True, psnr=-1, comparison = frame 0 previewed", r["status"] == "success" and (r["text"] or "").startswith("skipped (first segment)") and r["out"]["passed"] == [True] and r["out"]["psnr"] == [-1.0] and r["out"]["skipped"] == [True] and r["previewImgs"] >= 1 and r["color"] == "#4a4a38", str(r))
@@ -557,7 +588,7 @@ def main():
             pg2.wait_for_function("() => window.app && window.app.graph && Object.keys(LiteGraph.registered_node_types).length > 100", timeout=180000); time.sleep(2)
             lib_enum = json.loads(urllib.request.urlopen(a.empty_server + "/object_info/MMXLibraryImage").read())["MMXLibraryImage"]["input"]
             check("empty-library server: the file enum is [''] (unset first, no placeholder text) and the slot enum is the SLOTS list", lib_enum["required"]["file"][0] == [""] and lib_enum["optional"]["slot"][0][:2] == ["(none)", "Picture 1"] and "Picture 9" in lib_enum["optional"]["slot"][0], str(lib_enum["required"]["file"][0]))
-            for path, label, n_nodes in ((EX, "deck.json", 33), (EX_CHAIN, "deck_chain.json", 34)):
+            for path, label, n_nodes in ((EX, "deck.json", 33), (EX_CHAIN, "deck_chain.json", 34), (EX_GUIDED, "deck_chain_guided.json", 35)):
                 wfe = json.load(open(path))
                 n_err = len(errs2)
                 pg2.evaluate("wf => app.loadGraphData(wf)", wfe); time.sleep(4)
@@ -565,7 +596,9 @@ def main():
                     const toasts = [...document.querySelectorAll('.p-toast-message, .p-dialog')].map(e => e.innerText.slice(0, 200));
                     const libs = nodes.filter(x => x.type === 'MMXLibraryImage').map(x => { const f = x.widgets.find(w => w.name === 'file'), s = x.widgets.find(w => w.name === 'slot'); return {id: x.id, file: f.value, fileOk: f.options.values.includes(f.value), slot: s.value, slotOk: s.options.values.includes(s.value), order: x.widgets.slice(0, 2).map(w => w.name), body: (x.widgets.find(w => w.name === 'mmx_result') || {}).value}; });
                     const m = app.graph.getNodeById(185); const ffl = m.inputs.find(i => i.name === 'first_frame');
-                    return {count: nodes.length, missing, toasts, libs, mgr: {type: m.type, body: !!m._mmrpBody, outputs: m.outputs.length, ff: ffl && ffl.link != null}, gate: !!app.graph.getNodeById(406), deckPanel: !!app.graph.getNodeById(400)._mmxDeck}; }""", n_nodes)
+                    const g7 = app.graph.getNodeById(407); const chk = app.graph.getNodeById(301);
+                    return {count: nodes.length, missing, toasts, libs, mgr: {type: m.type, body: !!m._mmrpBody, outputs: m.outputs.length, ff: ffl && ffl.link != null}, gate: !!app.graph.getNodeById(406), guide: !!(g7 && g7.type === 'MiniMaxH3AddGuide'),
+                            threshold: chk && chk.widgets.find(w => w.name === 'threshold_db').value, deckPanel: !!app.graph.getNodeById(400)._mmxDeck}; }""", n_nodes)
                 print(f"   clean load {label}:", json.dumps(st)[:700])
                 # a toast about model files this host lacks, or a 404 on the base graph's VideoCombine preview, is not the pack's:
                 # only messages naming our nodes / widgets / validation count
@@ -576,8 +609,8 @@ def main():
                 check(f"{label}: Library nodes load file = '' and slot = shipped value, BOTH inside their dropdown lists; widgets are [file, slot] first",
                       [(x["file"], x["slot"]) for x in st["libs"]] == [("", "Picture 1"), ("", "(none)")] and all(x["fileOk"] and x["slotOk"] and x["order"] == ["file", "slot"] for x in st["libs"]), str(st["libs"])[:400])
                 check(f"{label}: the node body shows the empty library + the last mirror log line", all("library empty" in (x["body"] or "") and "last mirror log" in (x["body"] or "") for x in st["libs"]), str([x["body"] for x in st["libs"]])[:300])
-                check(f"{label}: MMX References Manager #185 with the RefPack body, 20 outputs, first_frame linked; Deck panel built" + ("; Chain Gate #406 present" if label.startswith("deck_chain") else ""),
-                      st["mgr"] == {"type": "MMXReferencesManager", "body": True, "outputs": 20, "ff": True} and st["deckPanel"] and st["gate"] == label.startswith("deck_chain"), str(st["mgr"]))
+                check(f"{label}: MMX References Manager #185 with the RefPack body, 20 outputs, first_frame linked; Deck panel built" + ("; Chain Gate #406 present" if label.startswith("deck_chain") else "") + ("; AddGuide #407 present, check at 20 dB" if "guided" in label else ""),
+                      st["mgr"] == {"type": "MMXReferencesManager", "body": True, "outputs": 20, "ff": True} and st["deckPanel"] and st["gate"] == label.startswith("deck_chain") and st["guide"] == ("guided" in label) and (st["threshold"] == (20 if "guided" in label else 12)), str(st["mgr"]) + str(st.get("threshold")))
                 q = pg2.evaluate("""async () => { const p = await app.graphToPrompt(); const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: (app.api && app.api.clientId) || 'ui-check'})});
                     const d = await res.json(); const ne = d.node_errors || {}; return Object.fromEntries(Object.entries(ne).map(([k, v]) => [k, [v.class_type, v.errors.map(e => e.type + ': ' + e.message + ' / ' + e.details)]])); }""")
                 mmx_errs = {k: v for k, v in q.items() if v[0].startswith("MMX")}
@@ -586,6 +619,13 @@ def main():
                 if label == "deck.json":
                     pg2.evaluate("""() => { const n = app.graph.getNodeById(402); app.canvas.ds.scale = 1; app.canvas.centerOnNode(n); app.canvas.setDirty(true, true); }"""); time.sleep(1)
                     node_shot(pg2, os.path.join(a.shots, "library_empty_402.png") if a.shots else "", 402)
+            wfc = json.load(open(EX_CHECK)); n_err = len(errs2)
+            pg2.evaluate("wf => app.loadGraphData(wf)", wfc); time.sleep(4)
+            st = pg2.evaluate("""() => { const nodes = app.graph._nodes || []; const missing = nodes.filter(x => !LiteGraph.registered_node_types[x.type]).map(x => x.type);
+                const p = app.graph.getNodeById(322); const L = id => app.graph.links.get ? app.graph.links.get(id) : app.graph.links[id]; const l = p && p.inputs[0].link != null && L(p.inputs[0].link);
+                return {count: nodes.length, missing, preview: p && p.type, src: l ? [Number(l.origin_id), Number(l.origin_slot)] : null, lcf: app.graph.getNodeById(303).widgets.map(w => [w.name, w.value]).slice(0, 3)}; }""")
+            check("chain_check.json on the empty-library server: loads with no missing types / pack errors; PreviewImage #322 on the check's comparison; Load Chain Frame use_frame = latest",
+                  st["count"] == 34 and not st["missing"] and len([e for e in errs2[n_err:] if ours(e)]) == 0 and st["preview"] == "PreviewImage" and st["src"] == [320, 3] and dict(st["lcf"]).get("use_frame") == "latest", json.dumps(st)[:300])
             pg2.close()
         else:
             print("skip clean-load checks (pass --empty-server for a ComfyUI with an empty library mirror)")

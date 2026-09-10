@@ -31,6 +31,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "examples", "deck.json")
 OUT_CHAIN = os.path.join(ROOT, "examples", "deck_chain.json")
+OUT_GUIDED = os.path.join(ROOT, "examples", "deck_chain_guided.json")
+THRESHOLD_GUIDED = 20.0        # deck_chain_guided.json: AddGuide pins frame 0, so the check can be stricter
 ROWS = 5
 LORAS = ["H3_Motion_BoosterV2.safetensors"]     # row 1 of the stack; edit in the node / send from the Deck
 CHAIN_FILE = "mmx_chain_last.png"
@@ -200,9 +202,44 @@ def build_chain(deck: dict) -> dict:
     return w
 
 
+def build_guided(chain: dict) -> dict:
+    """deck_chain.json + MiniMaxH3AddGuide #407: the Load Chain Frame image is pinned at frame 0
+    (positive <- R2V, latent <- R2V, vae <- video VAE, image <- #404) and its conditioning feeds
+    the BasicGuider instead of the R2V's; the check runs at THRESHOLD_GUIDED."""
+    w = copy.deepcopy(chain)
+    nodes = {n["id"]: n for n in w["nodes"]}
+    r2v, guider, vae, lc, chk = nodes[184], nodes[149], nodes[121], nodes[404], nodes[301]
+    links = {l[0]: l for l in w["links"]}
+    cond_in = next(i for i in guider["inputs"] if i["name"] == "conditioning")
+    old = links[cond_in["link"]]
+    assert old[1] == 184 and old[2] == 0, old
+    lid = w["last_link_id"]
+    l_pos, l_lat, l_vae, l_img, l_out = lid + 1, lid + 2, lid + 3, lid + 4, lid + 5
+    guide = {"id": 407, "type": "MiniMaxH3AddGuide", "pos": [guider["pos"][0] + 380, guider["pos"][1] + 400], "size": [340, 200], "flags": {}, "order": 14, "mode": 0,
+             "inputs": [{"name": "positive", "type": "CONDITIONING", "link": l_pos}, {"name": "latent", "type": "LATENT", "link": l_lat},
+                        {"name": "vae", "type": "VAE", "link": l_vae, "shape": 7}, {"name": "audio_vae", "type": "VAE", "link": None, "shape": 7},
+                        {"name": "image", "type": "IMAGE", "link": l_img, "shape": 7}, {"name": "audio", "type": "AUDIO", "link": None, "shape": 7}],
+             "outputs": [{"name": "positive", "type": "CONDITIONING", "links": [l_out], "slot_index": 0}],
+             "properties": {"Node name for S&R": "MiniMaxH3AddGuide"}, "widgets_values": [0], "title": "MiniMaxH3AddGuide — chain frame pinned at frame 0"}
+    w["links"] = [l for l in w["links"] if l[0] != old[0]]
+    w["links"] += [[l_pos, 184, 0, 407, 0, "CONDITIONING"], [l_lat, 184, 1, 407, 1, "LATENT"], [l_vae, 121, 0, 407, 2, "VAE"], [l_img, 404, 0, 407, 4, "IMAGE"],
+                   [l_out, 407, 0, 149, guider["inputs"].index(cond_in), "CONDITIONING"]]
+    r2v["outputs"][0]["links"] = [x for x in r2v["outputs"][0]["links"] if x != old[0]] + [l_pos]
+    r2v["outputs"][1]["links"].append(l_lat)
+    vae["outputs"][0]["links"].append(l_vae)
+    lc["outputs"][0]["links"].append(l_img)
+    cond_in["link"] = l_out
+    chk["widgets_values"] = [THRESHOLD_GUIDED, True]
+    w["nodes"].append(guide)
+    w["last_link_id"] = l_out
+    w["last_node_id"] = max(w["last_node_id"], 407)
+    w["id"] = "mmx-deck-chain-guided"
+    return w
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", required=True); ap.add_argument("--out", default=OUT); ap.add_argument("--out-chain", default=OUT_CHAIN)
+    ap.add_argument("--base", required=True); ap.add_argument("--out", default=OUT); ap.add_argument("--out-chain", default=OUT_CHAIN); ap.add_argument("--out-guided", default=OUT_GUIDED)
     a = ap.parse_args()
     ui = build(json.load(open(a.base)))
     json.dump(ui, open(a.out, "w"), indent=1)
@@ -210,6 +247,9 @@ def main():
     chain = build_chain(ui)
     json.dump(chain, open(a.out_chain, "w"), indent=1)
     print(f"wrote {a.out_chain}: {len(chain['nodes'])} nodes, {len(chain['links'])} links")
+    guided = build_guided(chain)
+    json.dump(guided, open(a.out_guided, "w"), indent=1)
+    print(f"wrote {a.out_guided}: {len(guided['nodes'])} nodes, {len(guided['links'])} links")
 
 
 if __name__ == "__main__":

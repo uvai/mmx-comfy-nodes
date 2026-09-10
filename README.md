@@ -75,6 +75,10 @@ after every run, so each queued run opens on the previous run's last frame; a fa
 its `_REJECTED.png` evidence and shows the verdict in the gate, and the chain goes on (turn
 `strict` on to stop the queue instead). Both deck graphs have no frame-0 guide, so their First
 Frame Check ships at 12 dB — see the two regimes under "First-frame verification".
+`examples/deck_chain_guided.json` is `deck_chain.json` plus **MiniMaxH3AddGuide #407**: the Load
+Chain Frame image is pinned at frame 0 (positive / latent from the R2V node, the video VAE, its
+conditioning into the BasicGuider), so the check runs stricter, at 20 dB. All three, and
+`chain_check.json`, carry a **Preview Image on the check's `comparison`** output (#302 / #322).
 
 **MMX Deck** — one DOM panel; its state (prompt, preset name, the five LoRA rows, the chosen
 target nodes) lives in four hidden widgets, so it rides in `widgets_values`.
@@ -250,9 +254,14 @@ HTTP routes on ComfyUI's port: `GET /mmx/presets`, `POST /mmx/presets/refresh`,
 lanczos-resized to the frame's size exactly as `MiniMaxH3AddGuide` does
 (`comfy.utils.common_upscale(…, "lanczos", "center")` — the node calls the same function inside
 ComfyUI). PSNR is over RGB in 0..1 (identical images report 100 dB), SSIM is Wang et al. on luma
-with an 11×11 σ=1.5 window. `passed = psnr >= threshold_db`. The comparison strip is written to
-the temp folder and previewed in the node; the abs-diff panel saturates at a mean per-pixel
-difference of 0.25.
+with an 11×11 σ=1.5 window. `passed = psnr >= threshold_db`. The comparison strip goes through
+the frontend's standard preview path exactly like core `PreviewImage`: written with
+`folder_paths.get_save_image_path` into the temp folder (`mmx_check_temp_<rand>_00001_.png`,
+type `temp`) and returned as `ui.images`, so it renders in the node in the classic canvas and in
+Nodes 2.0; the node's text body is capped in height so the strip keeps its room. Every shipped
+example also wires a Preview Image to `comparison`, which shows the strip whatever the frontend
+does with a custom node's preview. The abs-diff panel saturates at a mean per-pixel difference
+of 0.25.
 
 **Two regimes for the threshold.** *Guided* — `MiniMaxH3AddGuide` pins the reference at frame 0
 (`chain_check.json`, the studio chain): from the live joins (768×448) a correct reference
@@ -354,7 +363,7 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   presets, delete tombstones surviving a NAS pull, the phrase store (seed, add / delete / bulk
   replace, mirror round trip, re-seed after a local loss keeping deletions), the LoRA Stack,
   the Deck passthrough, the Manager subclass + key fallback, the check's skip path and inject.
-- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR] [--empty-server http://HOST2:8188] [--vue-too] [--loras-dir …/models/loras --library-dir …/mmx/library]` — 95 frontend checks
+- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR] [--empty-server http://HOST2:8188] [--vue-too] [--loras-dir …/models/loras --library-dir …/mmx/library]` — 103 frontend checks
   (playwright chromium) on `examples/deck.json`: no missing types; the stack took over #137's
   links with the turbo LoRA untouched; tag buttons follow the Manager's slots; Inject / Clear
   slot / Inject all land in the Manager's slot UI (tiles) and are reported honestly; Send lands
@@ -392,8 +401,12 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   three runs left segments 001–003 with thumbnails, the loader's `use_frame` lists them, picking
   segment 001 shows its thumbnail and a fourth run opens on exactly that frame (the Manager's
   written first frame is run 1's, not the latest), `✕ Clear chain history` empties the list and
-  keeps the fixed-name frame.
-- 2026-09-10: `tests/test_pack.py` 115 (119 with the RefPack) and `ui_check_deck.py` 95/95 on the
+  keeps the fixed-name frame; the **comparison strip** renders inside the check node in both
+  the classic canvas (the frontend's image-preview widget, ≥ 100 px under the text) and Nodes
+  2.0 (an `<img>` of the `mmx_check_temp_…` file), and `deck_chain_guided.json` /
+  `chain_check.json` load clean on the empty-library server (AddGuide wired, 20 dB; Preview on
+  `comparison`).
+- 2026-09-10: `tests/test_pack.py` 124 (128 with the RefPack) and `ui_check_deck.py` 103/103 on the
   CPU ComfyUI 0.34 / frontend 1.51.9, classic + Nodes 2.0, populated and empty-library servers.
 - 2026-09-09: both run green on a CPU ComfyUI 0.34 / frontend 1.51.9 with the RefPack, rgthree,
   KJNodes, VHS and ComfyMath installed (no H3 weights, so the model loaders show the frontend's
@@ -470,8 +483,8 @@ lists the store. Batch runs from the studio and canvas runs therefore share one 
 ## Tests
 
 ```
-python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (115 checks; torch /
+python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (124 checks; torch /
                                # PIL / ffmpeg / RefPack dependent ones are skipped without them)
 python3 tools/ui_check_deck.py --server http://127.0.0.1:8188 --empty-server http://127.0.0.1:8189 --vue-too --shots /tmp/shots
-                               # 95 playwright checks on deck.json + deck_chain.json (see Verification)
+                               # 103 playwright checks on deck.json + deck_chain.json (see Verification)
 ```
