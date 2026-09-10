@@ -8,7 +8,8 @@ import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 import * as M from "./mmx_api.js";
 
-const RESULT_NODES = ["MMXFirstFrameCheck", "MMXChainGate", "MMXLibraryImage", "MMXReferencesBuilder", "MMXSaveFrame", "MMXLoRAStack", "MMXPromptAffix"];
+const RESULT_NODES = ["MMXFirstFrameCheck", "MMXChainGate", "MMXLibraryImage", "MMXReferencesBuilder", "MMXSaveFrame", "MMXLoRAStack", "MMXPromptAffix", "MMXLoadChainFrame"];
+const LATEST = "latest";
 const LIB_NONE = "(library empty — press Refresh / Mirror from NAS)";   // legacy placeholder (0.2–0.4 files): read as "unset"
 const LIB_UNSET = "";                                                     // the dropdown's first entry: nothing picked yet
 const isUnset = v => typeof v !== "string" || !v || v === LIB_NONE || (v.startsWith("(") && v.endsWith(")"));
@@ -228,6 +229,72 @@ function setupLibraryNode(node) {
   node.setSize([Math.max(node.size[0], 380), Math.max(node.size[1], node.computeSize()[1] + 200)]);
 }
 
+// ── chain history (MMX Load Chain Frame) ─────────────────────────────────────
+// `use_frame` lists the gate's numbered copies for this node's `filename` (newest first, `latest`
+// first); the list is rebuilt from /mmx/chain/history on load, on Refresh, after every execution
+// of any chain node, and after Clear; the chosen frame's thumbnail is drawn in the node.
+async function fetchChain(filename) {
+  const r = await api.fetchApi("/mmx/chain/history?filename=" + encodeURIComponent(filename || "mmx_chain_last.png"));
+  return r.json();
+}
+function chainThumb(node, entry, latest) {
+  const fw = node.widgets.find(w => w.name === "use_frame"); const v = fw?.value || LATEST;
+  let url = null;
+  if (v === LATEST) { if (latest?.exists) url = api.apiURL(`/view?filename=${encodeURIComponent(latest.name)}&type=input&t=${Math.floor((latest.mtime || 0) * 1000)}`); }
+  else if (entry) url = api.apiURL(`/view?filename=${encodeURIComponent(entry.thumb || entry.name)}&subfolder=${encodeURIComponent(entry.subfolder)}&type=input`);
+  if (!url) { node.imgs = null; node.setDirtyCanvas(true, true); return; }
+  const img = new Image();
+  img.onload = () => { if ((node.widgets.find(w => w.name === "use_frame")?.value || LATEST) === v) { node.imgs = [img]; node.setDirtyCanvas(true, true); } };
+  img.onerror = () => { node.imgs = null; node.setDirtyCanvas(true, true); };
+  img.src = url;
+}
+async function refreshChainFrames(node, keepText) {
+  const fw = node.widgets.find(w => w.name === "use_frame"); if (!fw) return null;
+  const fn = node.widgets.find(w => w.name === "filename")?.value || "mmx_chain_last.png";
+  let d; try { d = await fetchChain(fn); } catch (e) { showResult(node, "chain history unavailable: " + (e?.message || e)); return null; }
+  node._mmxChain = d;
+  const cur = fw.value || LATEST;
+  fw.options.values = d.choices.includes(cur) ? d.choices : [...d.choices, cur];   // a saved pick the history lost stays visible; the server validates on queue
+  const e = d.entries.find(x => x.name === cur);
+  if (!keepText) {
+    const lines = [`${d.entries.length} chain frame${d.entries.length === 1 ? "" : "s"} in history for ${fn}` + (d.latest.exists ? ` — latest written ${new Date(d.latest.mtime * 1000).toLocaleString()}` : " — no chain frame yet (a run opens on the fallback)")];
+    if (cur !== LATEST) lines.push(e ? `use_frame: segment ${e.segment} (${e.ts.replace("-", " ")}) ${e.name}` : `use_frame: ${cur} is not in the history any more — queueing fails until you pick another`);
+    else lines.push("use_frame: latest" + (d.latest.exists ? "" : " (absent → fallback)"));
+    showResult(node, lines.join("\n"));
+  }
+  chainThumb(node, e, d.latest);
+  node.setDirtyCanvas(true, true);
+  return d;
+}
+function setupChainFrameNode(node) {
+  const fw = node.widgets.find(w => w.name === "use_frame");
+  if (fw) { const orig = fw.callback; fw.callback = function (...a) { const r = orig?.apply(this, a); refreshChainFrames(node); return r; }; }
+  const fnw = node.widgets.find(w => w.name === "filename");
+  if (fnw) { const orig = fnw.callback; fnw.callback = function (...a) { const r = orig?.apply(this, a); refreshChainFrames(node); return r; }; }
+  const refresh = node.addWidget("button", "↻ Refresh frames", null, async () => { const d = await refreshChainFrames(node); refresh.name = d ? `↻ Refresh frames (${d.entries.length})` : "↻ Refresh frames (failed)"; setTimeout(() => { refresh.name = "↻ Refresh frames"; node.setDirtyCanvas(true, true); }, 4000); node.setDirtyCanvas(true, true); });
+  const clear = node.addWidget("button", "✕ Clear chain history", null, async () => {
+    const fn = node.widgets.find(w => w.name === "filename")?.value || "mmx_chain_last.png";
+    const n = node._mmxChain?.entries?.length ?? "?";
+    if (!confirm(`Delete the ${n} history frame(s) of ${fn} (the numbered copies and thumbnails)? ${fn} itself is kept; use "start new chain" to ignore it.`)) return;
+    try {
+      const d = await (await api.fetchApi("/mmx/chain/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename: fn }) })).json();
+      if (fw) { fw.value = LATEST; }
+      await refreshChainFrames(node, true);
+      showResult(node, `cleared ${d.removed} file(s) of chain history for ${fn}; use_frame reset to latest`);
+    } catch (e) { showResult(node, "clear failed: " + (e?.message || e)); }
+  });
+  for (const b of [refresh, clear]) { b.serialize = false; b.options = { ...(b.options || {}), serialize: false }; }
+  const ours = [refresh, clear, resultWidget(node)];
+  node.widgets = [...node.widgets.filter(w => !ours.includes(w)), ...ours];   // the node's own widgets (filename, use_fallback, use_frame) stay first
+  node.mmxRefreshChain = keepText => refreshChainFrames(node, keepText);
+  const origConfigure = node.onConfigure;
+  node.onConfigure = function (...a) { const r = origConfigure?.apply(this, a); setTimeout(() => refreshChainFrames(node), 0); return r; };
+  refreshChainFrames(node);
+  node.setSize([Math.max(node.size[0], 400), Math.max(node.size[1], node.computeSize()[1] + 220)]);
+}
+// after a gate wrote a frame: every loader's list + thumbnail, keeping the text its own execution put in the body
+function refreshAllChainNodes() { for (const n of app.graph._nodes || []) if (n.comfyClass === "MMXLoadChainFrame") n.mmxRefreshChain?.(true); }
+
 // ── extension ────────────────────────────────────────────────────────────────
 app.registerExtension({
   name: "mmx.nodes",
@@ -264,6 +331,8 @@ app.registerExtension({
       if (nodeData.name === "MMXFirstFrameCheck" && Array.isArray(message?.passed)) verdict = message?.skipped?.[0] ? "skip" : !!message.passed[0];
       if (nodeData.name === "MMXChainGate") verdict = Array.isArray(message?.passed) ? !!message.passed[0] : true;   // strict fail raises instead (mmx-gate event)
       showResult(this, text, verdict);
+      if (nodeData.name === "MMXChainGate" || nodeData.name === "MMXSaveFrame") setTimeout(refreshAllChainNodes, 300);   // a new history entry: every loader's list
+      if (nodeData.name === "MMXLoadChainFrame") setTimeout(() => refreshChainFrames(this, true), 300);
     };
   },
   async nodeCreated(node) {
@@ -271,5 +340,6 @@ app.registerExtension({
     resultWidget(node);
     if (node.comfyClass === "MMXLibraryImage") setupLibraryNode(node);
     if (node.comfyClass === "MMXLoRAStack") setupStackNode(node);
+    if (node.comfyClass === "MMXLoadChainFrame") setupChainFrameNode(node);
   },
 });

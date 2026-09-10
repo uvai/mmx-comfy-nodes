@@ -9,6 +9,7 @@ import folder_paths
 import nodes as core_nodes
 
 from . import store as S
+from . import chain_history as CH
 
 NONE = "(none)"
 
@@ -231,21 +232,34 @@ class MMXSaveFrame:
 
 
 class MMXLoadChainFrame:
-    """Load the chain frame saved by MMX Save Frame; when it does not exist yet (first segment) or
-    `use_fallback` is on, pass the fallback image through instead. Re-executes whenever the file
-    changes (mtime + size in IS_CHANGED), which plain LoadImage does too but LoadImage refuses to
-    queue when the file is absent."""
+    """Load the chain frame saved by MMX Chain Gate / MMX Save Frame; when it does not exist yet
+    (first segment) or `use_fallback` is on, pass the fallback image through instead. `use_frame`
+    picks any earlier segment from the gate's history (input/mmx_chain_history/, newest first;
+    `latest` = the fixed-name file). Re-executes whenever the chosen file changes (mtime + size in
+    IS_CHANGED); plain LoadImage refuses to queue when the file is absent."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {"fallback": ("IMAGE",),
                              "filename": ("STRING", {"default": "mmx_chain_last.png"}),
-                             "use_fallback": ("BOOLEAN", {"default": False, "tooltip": "force the fallback (start a new chain)"})}}
+                             "use_fallback": ("BOOLEAN", {"default": False, "label_on": "start new chain (fallback)", "label_off": "continue chain",
+                                                          "tooltip": "force the fallback image (start a new chain); the history is kept — Clear chain history removes it"})},
+                "optional": {"use_frame": (CH.choices(), {"default": CH.LATEST,
+                                                          "tooltip": "which chain frame to open on: latest = the fixed-name file the gate wrote last; or any numbered "
+                                                                     "history frame (segment_timestamp, thumbnail in the node). Ignored when use_fallback is on."})}}
 
     RETURN_TYPES = ("IMAGE", "BOOLEAN")
     RETURN_NAMES = ("image", "from_file")
     FUNCTION = "run"
     CATEGORY = "mmx/chain"
+    DESCRIPTION = "The chain frame (latest or any history segment) when it exists, else the fallback; the chosen frame is shown in the node."
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, filename, use_fallback=False, use_frame=CH.LATEST):
+        # our own check for use_frame: the enum ComfyUI cached at load does not list frames written since
+        if use_frame and use_frame != CH.LATEST and not use_fallback and CH.find(filename, use_frame) is None:
+            return f"MMX Load Chain Frame: history frame {use_frame!r} not found (press Refresh frames, or pick latest)"
+        return True
 
     @classmethod
     def _path(cls, filename):
@@ -255,22 +269,30 @@ class MMXLoadChainFrame:
         return os.path.join(folder_paths.get_input_directory(), name)
 
     @classmethod
-    def IS_CHANGED(cls, fallback, filename, use_fallback):
-        p = cls._path(filename)
+    def IS_CHANGED(cls, fallback, filename, use_fallback, use_frame=CH.LATEST):
+        p, _, _ = CH.resolve(filename, use_frame)
         try:
-            st = os.stat(p); return f"{st.st_mtime_ns}:{st.st_size}:{use_fallback}"
-        except OSError:
-            return f"absent:{use_fallback}"
+            st = os.stat(p); return f"{p}:{st.st_mtime_ns}:{st.st_size}:{use_fallback}"
+        except (OSError, TypeError):
+            return f"absent:{use_frame}:{use_fallback}"
 
-    def run(self, fallback, filename, use_fallback):
+    def run(self, fallback, filename, use_fallback, use_frame=CH.LATEST):
         import numpy as np, torch
         from PIL import Image, ImageOps
-        p = self._path(filename)
-        if use_fallback or not os.path.isfile(p):
-            return (fallback, False)
+        p, why, entry = CH.resolve(filename, use_frame)
+        if use_fallback or not p:
+            text = "fallback image (start new chain)" if use_fallback else f"fallback image — {why}"
+            print("[mmx-chain-frame] " + text)
+            return {"ui": {"text": [text], "source": ["fallback"], "frame": [""]}, "result": (fallback, False)}
         img = ImageOps.exif_transpose(Image.open(p)).convert("RGB")
         arr = np.asarray(img).astype(np.float32) / 255.0
-        return (torch.from_numpy(arr)[None, ...], True)
+        text = f"chain frame: {why}  {img.width}x{img.height}"
+        # the node shows the frame it opened on: the history thumbnail, or the fixed-name file itself
+        shown = ({"filename": entry["thumb"] or entry["name"], "subfolder": entry["subfolder"], "type": "input"} if entry
+                 else {"filename": os.path.basename(p), "subfolder": "", "type": "input"})
+        print("[mmx-chain-frame] " + text)
+        return {"ui": {"text": [text], "images": [shown], "source": ["history" if entry else "latest"], "frame": [os.path.basename(p)]},
+                "result": (torch.from_numpy(arr)[None, ...], True)}
 
 
 NODE_CLASS_MAPPINGS = {

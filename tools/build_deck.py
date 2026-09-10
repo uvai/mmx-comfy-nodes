@@ -120,10 +120,10 @@ def build(base: dict) -> dict:
                                        {"name": "path", "type": "STRING", "links": [], "slot_index": 2}],
              "properties": {"Node name for S&R": "MMXLibraryImage"}, "widgets_values": [UNSET, "(none)"], "title": "MMX Library Image — first frame → Load Chain Frame"}]
     # 6. Load Chain Frame: fallback <- #402, image -> Manager first_frame + First Frame Check reference
-    load_chain = {"id": 404, "type": "MMXLoadChainFrame", "pos": [lib_x + 420, base_y + 560], "size": [400, 150], "flags": {}, "order": 3, "mode": 0,
+    load_chain = {"id": 404, "type": "MMXLoadChainFrame", "pos": [lib_x + 420, base_y + 560], "size": [400, 420], "flags": {}, "order": 3, "mode": 0,
                   "inputs": [{"name": "fallback", "type": "IMAGE", "link": l_fb}],
                   "outputs": [{"name": "image", "type": "IMAGE", "links": [l_ff, l_ref], "slot_index": 0}, {"name": "from_file", "type": "BOOLEAN", "links": [], "slot_index": 1}],
-                  "properties": {"Node name for S&R": "MMXLoadChainFrame"}, "widgets_values": [CHAIN_FILE, True],
+                  "properties": {"Node name for S&R": "MMXLoadChainFrame"}, "widgets_values": [CHAIN_FILE, True, "latest"],
                   "title": "MMX Load Chain Frame → Manager first_frame (last picture)"}
     old_ref = next(i for i in chk["inputs"] if i["name"] == "reference")
     old_link = old_ref["link"]
@@ -180,7 +180,7 @@ def build_chain(deck: dict) -> dict:
     w = copy.deepcopy(deck)
     nodes = {n["id"]: n for n in w["nodes"]}
     lc, chk, dec = nodes[404], nodes[301], nodes[133]
-    lc["widgets_values"] = [CHAIN_FILE, False]
+    lc["widgets_values"] = [CHAIN_FILE, False, "latest"]
     lc["title"] = "MMX Load Chain Frame → Manager first_frame (chain)"
     lid = w["last_link_id"]
     l_gi, l_gp, l_ps, l_ss = lid + 1, lid + 2, lid + 3, lid + 4

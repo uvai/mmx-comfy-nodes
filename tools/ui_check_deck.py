@@ -457,7 +457,7 @@ def main():
             L.connect(0, C, 0); C.connect(0, M, M.inputs.findIndex(i => i.name === 'first_frame')); C.connect(0, K, K.inputs.findIndex(i => i.name === 'reference'));
             F.connect(0, K, 0); F.connect(0, G, 0); K.connect(2, G, 1);
             M.connect(1, P, 0); M.connect(19, D, 0); C.connect(1, B, 0);
-            return {ids: {M: M.id, K: K.id, G: G.id, D: D.id, B: B.id, F: F.id}, tags: window.mmx.tagsOf(M).tags.map(t => [t.tag, t.file])}; }""" % json.dumps(flat_a), [chain_name, a.lib_b, a.frame])
+            return {ids: {M: M.id, K: K.id, G: G.id, D: D.id, B: B.id, F: F.id, C: C.id}, tags: window.mmx.tagsOf(M).tags.map(t => [t.tag, t.file])}; }""" % json.dumps(flat_a), [chain_name, a.lib_b, a.frame])
         check("first_frame graph: identity in the widget + first_frame linked -> <Picture 1> identity, <Picture 2> first_frame", g["tags"] == [["<Picture 1>", flat_a], ["<Picture 2>", "(first_frame input)"]], str(g))
         RUN = """async (ids) => {
             const p = await app.graphToPrompt(); const exported = p.output[String(ids.M)].inputs.references_json;
@@ -506,6 +506,35 @@ def main():
               "error" not in r and r["status"] == "success" and r["gate"]["written"] == [True] and r["gate"]["passed"] == [False] and r["chk"]["passed"] == [False] and r["gateInputs"]["strict"] is False
               and rej_img is not None and same_image(rej_img, chain_img), json.dumps(r)[:400])
         check("lenient gate body shows the check's verdict (FAIL + PSNR + SSIM from the wired outputs) and the node turns red", "FAIL  PSNR" in (r.get("body") or "") and "SSIM" in (r.get("body") or "") and "evidence kept" in (r.get("body") or "") and r.get("color") == "#7a2a2a", str(r.get("body")) + str(r.get("color")))
+        # 8d. chain history: three runs wrote three numbered copies; the loader lists them, opens on a chosen one, shows it, and Clear empties the list
+        hist = json.loads(urllib.request.urlopen(f"{a.server}/mmx/chain/history?filename={urllib.parse.quote(chain_name)}").read())
+        check("chain history: the three runs left segments 001-003 (newest first) with thumbnails; latest exists", [e["segment"] for e in hist["entries"]] == [3, 2, 1] and all(e["thumb"] for e in hist["entries"]) and hist["latest"]["exists"] and hist["choices"][0] == "latest", json.dumps(hist)[:300])
+        seg1 = hist["entries"][-1]["name"]
+        r = pg.evaluate("""async ([ids, seg1]) => { const C = app.graph.getNodeById(ids.C); await C.mmxRefreshChain();
+            const fw = C.widgets.find(w => w.name === 'use_frame'); const listed = fw.options.values.slice(); fw.value = seg1; fw.callback?.(seg1); await new Promise(r => setTimeout(r, 800));
+            const thumbBefore = !!(C.imgs && C.imgs.length);
+            const p = await app.graphToPrompt(); const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: (app.api && app.api.clientId) || 'ui-check'})});
+            const d = await res.json(); if (!res.ok) return {error: JSON.stringify(d).slice(0, 400)};
+            for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); const q = await (await fetch('/queue')).json(); if (!q.queue_running.length && !q.queue_pending.length) break; }
+            await new Promise(r => setTimeout(r, 1500));
+            const h = await (await fetch('/history/' + d.prompt_id)).json(); const e = h[d.prompt_id]; const o = e.outputs || {};
+            return {listed, thumbBefore, status: e.status && e.status.status_str, useFrame: p.output[String(ids.C)].inputs.use_frame, lcf: o[String(ids.C)], body: C.widgets.find(w => w.name === 'mmx_result')?.value, imgs: (C.imgs || []).length,
+                    exported: p.output[String(ids.M)].inputs.references_json, widgets: C.widgets.slice(0, 3).map(w => w.name)}; }""", [g["ids"], seg1])
+        print("   history pick:", json.dumps(r)[:500])
+        exp = json.loads(r["exported"])["references"] if "error" not in r else []
+        ffs = [x["file"] for x in exp if x["kind"] == "image" and x["file"].startswith("mmx_ff_")]
+        written = fetch_png(a.server, ffs[0]) if ffs else None
+        check("Load Chain Frame: use_frame lists latest + the 3 segments (widgets stay filename / use_fallback / use_frame first); picking segment 001 shows its thumbnail before the run",
+              "error" not in r and r["listed"][:1] == ["latest"] and len(r["listed"]) == 4 and seg1 in r["listed"] and r["thumbBefore"] and r["widgets"] == ["filename", "use_fallback", "use_frame"], json.dumps(r)[:300])
+        conds = {"success": r.get("status") == "success", "source history": r["lcf"]["source"] == ["history"], "body names segment 1": "history segment 1" in (r.get("body") or ""),
+                 "ui image is the history thumb": r["lcf"]["images"][0]["subfolder"].startswith("mmx_chain_history/"), "node shows an image": r["imgs"] >= 1,
+                 "written == run-1 frame": written is not None and same_image(written, frame_src), "written != run-3 frame": written is not None and not same_image(written, fetch_png(a.server, a.other_frame))}
+        check("run 4 on segment 001: the loader opened on that frame (body 'history segment 1', ui image = its thumbnail), so the Manager's first_frame IS the frame the gate wrote in run 1 (--frame), not the latest (run 3 wrote --other-frame)",
+              all(conds.values()), json.dumps(conds) + " " + json.dumps({k: v for k, v in r.items() if k in ("body", "imgs", "exported")})[:500])
+        r = pg.evaluate("""async (ids) => { const C = app.graph.getNodeById(ids.C); window.confirm = () => true; await C.widgets.find(w => w.name === '✕ Clear chain history').callback(); await new Promise(r => setTimeout(r, 500));
+            return {values: C.widgets.find(w => w.name === 'use_frame').options.values, value: C.widgets.find(w => w.name === 'use_frame').value, body: C.widgets.find(w => w.name === 'mmx_result')?.value}; }""", g["ids"])
+        hist2 = json.loads(urllib.request.urlopen(f"{a.server}/mmx/chain/history?filename={urllib.parse.quote(chain_name)}").read())
+        check("✕ Clear chain history: the numbered copies are gone, the dropdown is back to [latest], use_frame reset, the fixed-name frame kept", hist2["entries"] == [] and hist2["latest"]["exists"] and r["values"] == ["latest"] and r["value"] == "latest" and "cleared" in (r["body"] or ""), json.dumps(r)[:300] + json.dumps(hist2)[:200])
         if a.input_dir:
             for f in (chain_name, chain_name.replace(".png", "_REJECTED.png")):
                 try: os.remove(os.path.join(a.input_dir, f))

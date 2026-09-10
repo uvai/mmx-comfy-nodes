@@ -17,6 +17,8 @@ import math, os, time
 import numpy as np
 import torch
 
+from . import chain_history as CH
+
 try:
     import folder_paths
 except ImportError:  # tests
@@ -280,8 +282,9 @@ class MMXChainGate:
     FUNCTION = "run"
     OUTPUT_NODE = True
     CATEGORY = "mmx/chain"
-    DESCRIPTION = ("Writes the last frame under a fixed name for the next segment. strict: only when the first-frame check passed (a failure writes "
-                   "_REJECTED.png, keeps the old frame, stops the queue and raises). lenient: always, with the _REJECTED.png copy kept as evidence on a fail.")
+    DESCRIPTION = ("Writes the last frame under a fixed name for the next segment, plus a numbered copy with a thumbnail in input/mmx_chain_history/ "
+                   "(MMX Load Chain Frame's use_frame lists them). strict: only when the first-frame check passed (a failure writes _REJECTED.png, keeps "
+                   "the old frame, stops the queue and raises). lenient: always, with the _REJECTED.png copy kept as evidence on a fail.")
 
     @classmethod
     def IS_CHANGED(cls, **kw):
@@ -294,15 +297,17 @@ class MMXChainGate:
                   + (f"  SSIM {float(ssim):.3f}" if ssim is not None and float(ssim) >= 0 else "")
         if passed:
             _write_png(last, good)
-            text = f"check {verdict}\n-> wrote {good}"
+            h = _record(filename, good)
+            text = f"check {verdict}\n-> wrote {good}\n-> history: {h['name'] if h else '(not recorded)'}"
             print("[mmx-gate] " + text.replace("\n", " | "))
-            return {"ui": {"text": [text], "path": [good], "written": [True], "passed": [True]}, "result": (good, True)}
+            return {"ui": {"text": [text], "path": [good], "written": [True], "passed": [True], "history": [h["name"] if h else ""]}, "result": (good, True)}
         if not strict:
             _write_png(last, rejected)
             _write_png(last, good)
-            text = f"check {verdict}  (lenient: chain continues)\n-> wrote {good}\n-> evidence kept: {rejected}"
+            h = _record(filename, good)
+            text = f"check {verdict}  (lenient: chain continues)\n-> wrote {good}\n-> evidence kept: {rejected}\n-> history: {h['name'] if h else '(not recorded)'}"
             print("[mmx-gate] " + text.replace("\n", " | "))
-            return {"ui": {"text": [text], "path": [good], "written": [True], "passed": [False]}, "result": (good, True)}
+            return {"ui": {"text": [text], "path": [good], "written": [True], "passed": [False], "history": [h["name"] if h else ""]}, "result": (good, True)}
         _write_png(last, rejected)
         kept = f"{good} kept from the previous segment" if os.path.isfile(good) else f"{good} not written (no previous frame)"
         dropped = _wipe_pending_queue() if stop_queue else 0
@@ -311,6 +316,15 @@ class MMXChainGate:
         print("[mmx-gate] " + text)
         _notify(unique_id, text)
         raise RuntimeError("MMX Chain Gate: first-frame check FAILED. " + text)
+
+
+def _record(filename: str, good: str):
+    """numbered copy + thumbnail in input/mmx_chain_history/<stem>/ (never fails the gate)"""
+    try:
+        return CH.record(filename, good)
+    except Exception as e:
+        print(f"[mmx-gate] history copy failed: {e}")
+        return None
 
 
 def _notify(unique_id, text: str) -> None:

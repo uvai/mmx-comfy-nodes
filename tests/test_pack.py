@@ -295,11 +295,11 @@ def main():
         check("MMXSaveFrame writes the LAST frame under a fixed name in the input dir", os.path.isfile(path) and Image.open(path).getpixel((0, 0)) == (255, 0, 0))
         fb = torch.ones((1, 4, 4, 3)) * 0.5
         out = nodes.MMXLoadChainFrame().run(fb, "chain_test", False)
-        check("MMXLoadChainFrame loads the saved frame", out[1] is True and tuple(out[0].shape) == (1, 8, 8, 3) and float(out[0][0, 0, 0, 0]) > 0.99)
+        check("MMXLoadChainFrame loads the saved frame", out["result"][1] is True and tuple(out["result"][0].shape) == (1, 8, 8, 3) and float(out["result"][0][0, 0, 0, 0]) > 0.99)
         out = nodes.MMXLoadChainFrame().run(fb, "absent_file", False)
-        check("MMXLoadChainFrame falls back when the file is absent", out[1] is False and out[0] is fb)
+        check("MMXLoadChainFrame falls back when the file is absent", out["result"][1] is False and out["result"][0] is fb)
         out = nodes.MMXLoadChainFrame().run(fb, "chain_test", True)
-        check("use_fallback forces the fallback", out[1] is False and out[0] is fb)
+        check("use_fallback forces the fallback", out["result"][1] is False and out["result"][0] is fb and out["ui"]["source"] == ["fallback"])
         s1 = nodes.MMXLoadChainFrame.IS_CHANGED(fb, "chain_test", False); time.sleep(0.02); nodes.MMXSaveFrame().run(img * 0.5, "chain_test")
         check("IS_CHANGED tracks the file", nodes.MMXLoadChainFrame.IS_CHANGED(fb, "chain_test", False) != s1)
     except ImportError as e:
@@ -368,7 +368,30 @@ def main():
         check("ChainGate lenient fail: no raise, the chain frame IS rewritten, the _REJECTED.png evidence is written alongside, body shows the check's verdict",
               r["result"] == (good, True) and r["ui"]["passed"] == [False] and after != before and os.path.isfile(rejected) and open(rejected, "rb").read() == after
               and "FAIL  PSNR 13.20 dB  SSIM 0.610" in r["ui"]["text"][0] and "lenient" in r["ui"]["text"][0] and rejected in r["ui"]["text"][0], str(r["ui"]["text"]))
+        # chain history: every written chain frame gets a numbered copy + thumbnail; Load Chain Frame can open on any of them
+        CH = importlib.import_module("mmx_presets.chain_history")
+        hist = CH.list_history("gate_test")
+        check("gate writes the history copy + thumbnail (segment 001 for the pass, 002 for the lenient fail), newest first, thumb ≤ 192 px",
+              [e["segment"] for e in hist] == [2, 1] and all(e["thumb"] and os.path.isfile(os.path.join(CH.history_dir("gate_test"), e["thumb"])) for e in hist)
+              and Image.open(os.path.join(CH.history_dir("gate_test"), hist[0]["thumb"])).size[0] <= 192 and hist[0]["name"].startswith("gate_test_002_") and "history: gate_test_002_" in r["ui"]["text"][0], str(hist))
+        check("history naming: label strips a trailing _last, choices = latest + names newest first, next segment counts up", CH.label_of("mmx_chain_last.png") == "mmx_chain" and CH.choices("gate_test")[:2] == ["latest", hist[0]["name"]] and CH.next_segment("gate_test") == 3)
+        lcf = nodes.MMXLoadChainFrame()
+        fb = torch.zeros((1, 64, 96, 3)); fb[..., 2] = 1.0
+        r_hist = lcf.run(fb, "gate_test", False, use_frame=hist[1]["name"])       # segment 1 = the PASS frame (frames[-1])
+        r_latest = lcf.run(fb, "gate_test", False, use_frame="latest")            # the lenient write (frames*0.1)
+        r_fb = lcf.run(fb, "gate_test", True, use_frame=hist[0]["name"])
+        r_missing = lcf.run(fb, "gate_test", False, use_frame="gate_test_099_20200101-000000.png")
+        check("Load Chain Frame use_frame: a history segment loads THAT frame (from_file True, body names the segment, thumbnail in ui.images); latest loads the fixed-name file",
+              r_hist["result"][1] is True and abs(float(r_hist["result"][0][0, 0, 0, 0]) - float(frames[-1, 0, 0, 0])) < 0.02 and "history segment 1" in r_hist["ui"]["text"][0] and r_hist["ui"]["images"][0]["subfolder"] == CH.subfolder("gate_test")
+              and r_latest["result"][1] is True and abs(float(r_latest["result"][0][0, 0, 0, 0]) - float(frames[-1, 0, 0, 0]) * 0.1) < 0.02 and r_latest["ui"]["source"] == ["latest"], str(r_hist["ui"]) + str(r_latest["ui"]))
+        check("use_fallback wins over use_frame; a missing history frame falls back too (body says why) and VALIDATE_INPUTS refuses it",
+              r_fb["result"][1] is False and r_fb["ui"]["source"] == ["fallback"] and r_missing["result"][1] is False and "not found" in r_missing["ui"]["text"][0]
+              and nodes.MMXLoadChainFrame.VALIDATE_INPUTS("gate_test", False, "gate_test_099_20200101-000000.png") != True and nodes.MMXLoadChainFrame.VALIDATE_INPUTS("gate_test", False, hist[0]["name"]) is True
+              and nodes.MMXLoadChainFrame.VALIDATE_INPUTS("gate_test", False, "latest") is True and "use_frame" in nodes.MMXLoadChainFrame.INPUT_TYPES()["optional"], str(r_missing["ui"]))
+        n_removed = CH.clear_history("gate_test")
+        check("clear chain history removes the copies + thumbs (the fixed-name frame is kept); numbering restarts at 001", n_removed == 4 and CH.list_history("gate_test") == [] and os.path.isfile(good) and CH.next_segment("gate_test") == 1, str(n_removed))
         r = gate.run(frames, True, "gate_test", strict=False, psnr=31.6, ssim=0.93)
+        CH.clear_history("gate_test")
         check("ChainGate pass shows the verdict too; INPUT_TYPES: strict (default True = the old behaviour), psnr / ssim forceInput",
               r["ui"]["passed"] == [True] and "PASS  PSNR 31.60 dB" in r["ui"]["text"][0] and chk.MMXChainGate.INPUT_TYPES()["optional"]["strict"][1]["default"] is True
               and chk.MMXChainGate.INPUT_TYPES()["optional"]["psnr"][1]["forceInput"] and list(chk.MMXChainGate.INPUT_TYPES()["optional"]) == ["stop_queue", "strict", "psnr", "ssim"], str(r["ui"]["text"]))
@@ -473,10 +496,10 @@ def main():
         check(f"{name}: every link is referenced by its source output and target input", not dangling, str(dangling)[:200])
         if name == "deck_chain.json":
             check("deck_chain.json: Chain Gate #406 <- decoded frames 133 + check passed/psnr/ssim; lenient (strict false); Load Chain Frame use_fallback false",
-                  src(406, "images") == (133, 0) and src(406, "passed") == (301, 2) and src(406, "psnr") == (301, 0) and src(406, "ssim") == (301, 1) and by[404]["widgets_values"] == ["mmx_chain_last.png", False] and by[406]["widgets_values"] == ["mmx_chain_last.png", True, False] and w["id"] == "mmx-deck-chain")
+                  src(406, "images") == (133, 0) and src(406, "passed") == (301, 2) and src(406, "psnr") == (301, 0) and src(406, "ssim") == (301, 1) and by[404]["widgets_values"] == ["mmx_chain_last.png", False, "latest"] and by[406]["widgets_values"] == ["mmx_chain_last.png", True, False] and w["id"] == "mmx-deck-chain")
         else:
-            check("deck.json: no Chain Gate, Load Chain Frame always uses the fallback (one segment)", 406 not in by and by[404]["widgets_values"] == ["mmx_chain_last.png", True] and w["id"] == "mmx-deck")
-        check(f"{name}: First Frame Check threshold 12 dB (no frame-0 guide in this graph), enabled", by[301]["widgets_values"] == [12.0, True], str(by[301]["widgets_values"]))
+            check("deck.json: no Chain Gate, Load Chain Frame always uses the fallback (one segment)", 406 not in by and by[404]["widgets_values"] == ["mmx_chain_last.png", True, "latest"] and w["id"] == "mmx-deck")
+        check(f"{name}: First Frame Check threshold 12 dB (no frame-0 guide in this graph), enabled; Load Chain Frame use_frame = latest", by[301]["widgets_values"] == [12.0, True] and by[404]["widgets_values"][2] == "latest", str(by[301]["widgets_values"]))
 
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} passed")

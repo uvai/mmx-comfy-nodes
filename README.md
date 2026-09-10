@@ -221,9 +221,9 @@ RefPack found, Manager registered, store paths).
 | **MMX References Manager** | = MiniMaxH3ReferencePack + optional `first_frame` IMAGE (written into `input/` at run time as the LAST picture; not connected = stock behaviour) | = MiniMaxH3ReferencePack (20 outputs) + key fallback + re-render on external write; `debug` names the first-frame file and slot |
 | **MMX Sequence** | model, clip, index INT, strength_scale, preset_1..preset_8 | model, clip, prompt, preset_name, slot, count — empty slots skipped, index wraps over the filled ones |
 | **MMX Save Frame (fixed name)** | image, filename | writes the LAST image of the batch as `input/<filename>.png`, overwriting (OUTPUT_NODE) |
-| **MMX Load Chain Frame** | fallback IMAGE, filename, use_fallback | the saved frame when it exists, else the fallback; re-executes when the file changes |
+| **MMX Load Chain Frame** | fallback IMAGE, filename, use_fallback ("start new chain"), use_frame (`latest` or any history frame; call-time list, lazily validated) | image, from_file. The chosen chain frame when it exists, else the fallback; the frame it opened on is shown in the node (text + thumbnail); re-executes when that file changes. Buttons: `↻ Refresh frames`, `✕ Clear chain history` |
 | **MMX First Frame Check** | images (VAE Decode batch), threshold_db (node default 24 = guided; the unguided deck examples ship 12), reference IMAGE (optional: slot-9 image or previous last frame), enabled | psnr FLOAT, ssim FLOAT, passed BOOLEAN, comparison IMAGE (reference \| frame 0 \| abs-diff heat-map, labelled); OUTPUT_NODE — numbers + PASS/FAIL shown in the node, strip previewed; no reference / disabled → skipped (passed=True, psnr=-1, comparison=frame 0) |
-| **MMX Chain Gate** | images, passed BOOLEAN, filename (`mmx_chain_last.png`), stop_queue, strict (default on; `deck_chain.json` off), psnr / ssim FLOAT (optional, wire the check's) | path STRING, written BOOLEAN. passed → writes the LAST frame to `input/<filename>` (overwrite). not passed, strict → writes `<stem>_REJECTED.png`, leaves the previous good frame untouched, clears the pending queue and raises `MMX Chain Gate: first-frame check FAILED …`; not passed, lenient → writes `<filename>` anyway AND the `_REJECTED.png` copy, no raise. Body shows the check's verdict (PSNR / SSIM), red / green |
+| **MMX Chain Gate** | images, passed BOOLEAN, filename (`mmx_chain_last.png`), stop_queue, strict (default on; `deck_chain.json` off), psnr / ssim FLOAT (optional, wire the check's) | path STRING, written BOOLEAN. passed → writes the LAST frame to `input/<filename>` (overwrite). not passed, strict → writes `<stem>_REJECTED.png`, leaves the previous good frame untouched, clears the pending queue and raises `MMX Chain Gate: first-frame check FAILED …`; not passed, lenient → writes `<filename>` anyway AND the `_REJECTED.png` copy, no raise. Every written chain frame also gets a numbered copy + thumbnail in `input/mmx_chain_history/<stem>/` (`mmx_chain_<segment>_<timestamp>.png`). Body shows the check's verdict (PSNR / SSIM), red / green |
 | **MMX Library Image** | file (dropdown over `/workspace/mmx/library/{Subjects,VideoRef,Sets}/**`; first entry empty = nothing picked, an error only on queue), slot (`(none)` / Picture 1–9 / Video 1–3 / Audio 1 for Inject; the enum is the module's `SLOTS`, what the examples save) | image IMAGE (mp4: first frame), filename STRING (the file copied into `ComfyUI/input` as `Subjects__j__j1.jpg`, for the References Manager), path STRING |
 | **MMX References Builder** | image_1..9, video_1..3, audio_1 (STRING, optional), use_soundtrack | references_json STRING (exact `MiniMaxH3ReferencePack` schema, compacted in slot order), picture_map STRING (`slot 9 -> <Picture 5>`, `video 1 -> <Video 1> (+ soundtrack <Audio 1>)`) |
 
@@ -276,6 +276,21 @@ copy alongside so the evidence is kept. In both modes wire the check's `psnr` / 
 gate's optional inputs and its body shows the verdict ("check FAIL  PSNR 13.20 dB  SSIM 0.610 …",
 red on a fail, green on a pass); the node body shows the verdict either
 way (a websocket event carries it before the exception aborts the node's normal ui output).
+
+**Chain history.** Whenever the gate writes `input/<filename>` it also copies it to
+`input/mmx_chain_history/<stem>/<label>_<segment>_<timestamp>.png` (`mmx_chain_last.png` →
+`mmx_chain_001_20260910-094132.png`, segment numbers count up per chain) with a 192 px
+`_thumb.jpg` beside it. `MMX Load Chain Frame` gains `use_frame`: `latest` (default) opens on the
+fixed-name file as before; any history entry opens on that segment instead — the dropdown lists
+the copies newest first (rebuilt from `GET /mmx/chain/history?filename=…` on load, on
+`↻ Refresh frames`, and after every gate run), the selected entry's thumbnail is drawn in the
+node, and the node body says which frame the run actually opened on ("chain frame: history
+segment 1 (…)", "chain frame: latest (…)", "fallback image — no chain frame yet"). A history
+frame picked after the page loaded queues fine (the node validates it itself); a frame that
+has since been deleted fails the queue with its name. `use_fallback` ("start new chain") still
+wins over everything and keeps the history; `✕ Clear chain history` (`POST /mmx/chain/clear`)
+deletes the numbered copies and thumbnails of that chain — never `<filename>` itself — and
+resets `use_frame` to `latest`. Segment numbering restarts at 001 afterwards.
 
 ## Library (MMX Library Image)
 
@@ -339,7 +354,7 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   presets, delete tombstones surviving a NAS pull, the phrase store (seed, add / delete / bulk
   replace, mirror round trip, re-seed after a local loss keeping deletions), the LoRA Stack,
   the Deck passthrough, the Manager subclass + key fallback, the check's skip path and inject.
-- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR] [--empty-server http://HOST2:8188] [--vue-too] [--loras-dir …/models/loras --library-dir …/mmx/library]` — 91 frontend checks
+- `python3 tools/ui_check_deck.py --server http://HOST:8188 [--shots DIR] [--empty-server http://HOST2:8188] [--vue-too] [--loras-dir …/models/loras --library-dir …/mmx/library]` — 95 frontend checks
   (playwright chromium) on `examples/deck.json`: no missing types; the stack took over #137's
   links with the turbo LoRA untouched; tag buttons follow the Manager's slots; Inject / Clear
   slot / Inject all land in the Manager's slot UI (tiles) and are reported honestly; Send lands
@@ -373,8 +388,12 @@ Pick your own library files in the two dropdowns (the example carries placeholde
   #402 (never `value_not_in_list`, nothing on the unwired #401); the **lenient gate**: with
   `strict` off and a failing check (threshold 100 against different frames) the run succeeds,
   the chain frame is written anyway, the `_REJECTED.png` copy is byte-identical alongside, the
-  gate body shows "check FAIL  PSNR … SSIM …" and the node turns red.
-- 2026-09-10: `tests/test_pack.py` 110 (114 with the RefPack) and `ui_check_deck.py` 91/91 on the
+  gate body shows "check FAIL  PSNR … SSIM …" and the node turns red; **chain history**: the
+  three runs left segments 001–003 with thumbnails, the loader's `use_frame` lists them, picking
+  segment 001 shows its thumbnail and a fourth run opens on exactly that frame (the Manager's
+  written first frame is run 1's, not the latest), `✕ Clear chain history` empties the list and
+  keeps the fixed-name frame.
+- 2026-09-10: `tests/test_pack.py` 115 (119 with the RefPack) and `ui_check_deck.py` 95/95 on the
   CPU ComfyUI 0.34 / frontend 1.51.9, classic + Nodes 2.0, populated and empty-library servers.
 - 2026-09-09: both run green on a CPU ComfyUI 0.34 / frontend 1.51.9 with the RefPack, rgthree,
   KJNodes, VHS and ComfyMath installed (no H3 weights, so the model loaders show the frontend's
@@ -451,8 +470,8 @@ lists the store. Batch runs from the studio and canvas runs therefore share one 
 ## Tests
 
 ```
-python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (110 checks; torch /
+python3 tests/test_pack.py     # ComfyUI stubbed; NAS mirror through a fake ssh (115 checks; torch /
                                # PIL / ffmpeg / RefPack dependent ones are skipped without them)
 python3 tools/ui_check_deck.py --server http://127.0.0.1:8188 --empty-server http://127.0.0.1:8189 --vue-too --shots /tmp/shots
-                               # 91 playwright checks on deck.json + deck_chain.json (see Verification)
+                               # 95 playwright checks on deck.json + deck_chain.json (see Verification)
 ```

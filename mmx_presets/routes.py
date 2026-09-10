@@ -30,6 +30,8 @@ button and by tooling:
 """
 from __future__ import annotations
 
+import os
+
 import json
 
 from . import store as S
@@ -50,6 +52,23 @@ def register(server_instance) -> bool:
     except Exception:
         return False
     routes = server_instance.routes
+    from . import chain_history as CH
+
+    @routes.get("/mmx/chain/history")
+    async def chain_history(request):
+        fn = request.query.get("filename") or "mmx_chain_last.png"
+        lp = CH.latest_path(fn)
+        latest = {"name": os.path.basename(lp), "exists": os.path.isfile(lp)}
+        if latest["exists"]:
+            st = os.stat(lp); latest.update(size=st.st_size, mtime=st.st_mtime)
+        ents = CH.list_history(fn)
+        return web.json_response({"filename": fn, "latest": latest, "entries": ents, "choices": [CH.LATEST] + [e["name"] for e in ents], "dir": CH.history_dir(fn)})
+
+    @routes.post("/mmx/chain/clear")
+    async def chain_clear(request):
+        body = await request.json()
+        fn = str(body.get("filename") or "mmx_chain_last.png")
+        return web.json_response({"filename": fn, "removed": CH.clear_history(fn), "entries": CH.list_history(fn)})
     st = S.get_store()
 
     @routes.get("/mmx/presets")

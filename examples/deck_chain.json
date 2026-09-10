@@ -1910,7 +1910,7 @@
    ],
    "size": [
     400,
-    150
+    420
    ],
    "flags": {},
    "order": 3,
@@ -1944,7 +1944,8 @@
    },
    "widgets_values": [
     "mmx_chain_last.png",
-    false
+    false,
+    "latest"
    ],
    "title": "MMX Load Chain Frame \u2192 Manager first_frame (chain)"
   },
