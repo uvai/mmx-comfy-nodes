@@ -9,7 +9,9 @@ import { ComfyWidgets } from "../../scripts/widgets.js";
 import * as M from "./mmx_api.js";
 
 const RESULT_NODES = ["MMXFirstFrameCheck", "MMXChainGate", "MMXLibraryImage", "MMXReferencesBuilder", "MMXSaveFrame", "MMXLoRAStack", "MMXPromptAffix"];
-const LIB_NONE = "(library empty — press Refresh / Mirror from NAS)";
+const LIB_NONE = "(library empty — press Refresh / Mirror from NAS)";   // legacy placeholder (0.2–0.4 files): read as "unset"
+const LIB_UNSET = "";                                                     // the dropdown's first entry: nothing picked yet
+const isUnset = v => typeof v !== "string" || !v || v === LIB_NONE || (v.startsWith("(") && v.endsWith(")"));
 const COLORS = { pass: { color: "#1f4d2b", bgcolor: "#27603a" }, fail: { color: "#5a1f1f", bgcolor: "#7a2a2a" } };
 let lib = { paths: [], items: {}, root: "", loaded: false, lastLine: "" };
 
@@ -115,6 +117,7 @@ function setupInjectButtons(node) {
     showResult(node, lines.join("\n")); all.name = "⇢ Inject all (group)"; node.setDirtyCanvas(true, true);
   });
   for (const b of [inject, clear, all]) { b.serialize = false; b.options = { ...(b.options || {}), serialize: false }; }
+  return [inject, clear, all];
 }
 
 // ── library ──────────────────────────────────────────────────────────────────
@@ -128,25 +131,35 @@ async function fetchLibrary(refresh, sync) {
 
 function fileWidget(node) { return node.widgets?.find(w => w.name === "file"); }
 
+// Rebuild the dropdown in place from the shared library list (load, Refresh, R, a finished
+// mirror, a search keystroke). The current pick is never forced: an unset value stays unset, a
+// pick that is in the list stays selected, and a saved pick the mirror does not (yet) hold is
+// kept visible as an extra entry — it becomes a normal entry the moment the mirror brings the
+// file, and the server validates it only on queue.
 function applyFilter(node) {
   const fw = fileWidget(node); if (!fw) return;
   const q = (node.widgets?.find(w => w.name === "mmx_search")?.value || "").trim().toLowerCase();
   const terms = q.split(/\s+/).filter(Boolean);
-  let values = lib.paths.filter(p => terms.every(t => p.toLowerCase().includes(t)));
-  if (!values.length) values = lib.paths.length ? [] : [LIB_NONE];
-  fw.options.values = values.length ? values : [terms.length ? `(no match for "${q}")` : LIB_NONE];
+  const matches = lib.paths.filter(p => terms.every(t => p.toLowerCase().includes(t)));
+  const cur = isUnset(fw.value) ? LIB_UNSET : fw.value;
+  const values = [LIB_UNSET, ...matches];
+  if (cur && !values.includes(cur)) values.push(cur);
+  fw.options.values = values;
+  if (terms.length && matches.length && !matches.includes(cur)) { fw.value = matches[0]; loadThumb(node); }   // typing a search picks the first match
+  else if (fw.value !== cur) fw.value = cur;                                                                     // the legacy placeholder reads as unset
   if (!lib.paths.length) showResult(node, `library empty (${lib.root || "mirror root unknown"}) — last mirror log:\n${lib.lastLine || "(no mirror log yet)"}\nThe boot mirror retries every 60 s for 2 h while the share is locked; unlock it in vgo, or press Mirror from NAS.`);
-  if (!fw.options.values.includes(fw.value)) {
-    // keep a valid selection: the first match when filtering, else leave the stored value alone
-    if (values.length && terms.length) { fw.value = values[0]; loadThumb(node); }
-  }
+  else if (!fw.value) showResult(node, `no file selected — ${lib.paths.length} file${lib.paths.length === 1 ? "" : "s"} in the library (pick one in the dropdown; the search box filters it). Not an error until queued.`);
+  else if (!lib.paths.includes(fw.value)) showResult(node, `${fw.value} is not in the mirror (${lib.root || "?"}) — kept as your pick; it is used as soon as the mirror brings it (Refresh / Mirror from NAS).\nlast mirror log: ${lib.lastLine || "(no mirror log yet)"}`);
   node.setDirtyCanvas(true, true);
+}
+function refreshAllLibraryNodes() {
+  for (const n of app.graph._nodes || []) if (n.comfyClass === "MMXLibraryImage") { applyFilter(n); loadThumb(n); }
 }
 
 function loadThumb(node) {
   const fw = fileWidget(node);
   const p = fw?.value;
-  if (!p || p.startsWith("(")) { node.imgs = null; node.setDirtyCanvas(true, true); return; }
+  if (isUnset(p)) { node.imgs = null; node.setDirtyCanvas(true, true); return; }
   const img = new Image();
   img.onload = () => { if (fileWidget(node)?.value === p) { node.imgs = [img]; node.setSizeForImage?.(); node.setDirtyCanvas(true, true); } };
   img.onerror = () => { if (fileWidget(node)?.value === p) { node.imgs = null; node.setDirtyCanvas(true, true); } };
@@ -163,7 +176,7 @@ async function pollSync(node, btn) {
     const tail = (st.log_tail || "").trim().split("\n").pop() || "";
     btn.name = `⇣ mirroring… ${tail.slice(-48)}`; node.setDirtyCanvas(true, true);
     if (!st.running) {
-      await fetchLibrary(true, false); applyFilter(node);
+      await fetchLibrary(true, false); refreshAllLibraryNodes();   // every Library node's list, in place, picks kept
       btn.name = `⇣ Mirror from NAS (done: ${lib.paths.length} files${st.last?.rc ? ", rc " + st.last.rc : ""})`;
       showResult(node, (st.log_tail || "").trim().split("\n").slice(-4).join("\n"));
       break;
@@ -175,14 +188,14 @@ async function pollSync(node, btn) {
 
 function setupLibraryNode(node) {
   const fw = fileWidget(node);
-  // search box (client side, not serialized)
+  // search box (client side, not serialized). It is appended AFTER the node's own widgets
+  // (file, slot) so widgets_values keeps its two-entry shape on every frontend, index-mapped or
+  // not: [file, slot] in the file is [file, slot] on the canvas.
   const sw = node.addWidget("text", "mmx_search", "", () => applyFilter(node), { serialize: false });
   sw.serialize = false; sw.options = { ...(sw.options || {}), serialize: false, placeholder: "search" };
-  // keep the search box right under the dropdown
-  const i = node.widgets.indexOf(sw); node.widgets.splice(i, 1); node.widgets.splice(node.widgets.indexOf(fw) + 1, 0, sw);
   const refresh = node.addWidget("button", "↻ Refresh library", null, async () => {
     refresh.name = "refreshing…"; node.setDirtyCanvas(true, true);
-    try { await fetchLibrary(true, false); applyFilter(node); loadThumb(node); refresh.name = `↻ Refresh library (${lib.paths.length} files)`; }
+    try { await fetchLibrary(true, false); refreshAllLibraryNodes(); refresh.name = `↻ Refresh library (${lib.paths.length} files)`; }
     catch (e) { refresh.name = "↻ Refresh library (failed: " + (e?.message || e) + ")"; }
     setTimeout(() => { refresh.name = "↻ Refresh library"; node.setDirtyCanvas(true, true); }, 4000);
     node.setDirtyCanvas(true, true);
@@ -203,7 +216,11 @@ function setupLibraryNode(node) {
     const orig = fw.callback;
     fw.callback = function (...args) { const r = orig?.apply(this, args); loadThumb(node); return r; };
   }
-  setupInjectButtons(node);
+  const buttons = setupInjectButtons(node);
+  // body order: the node's own widgets (file, slot) first and in definition order — the shape
+  // widgets_values is saved and restored in — then ours: search, refresh, mirror, inject buttons, result
+  const ours = [sw, refresh, mirror, ...buttons, resultWidget(node)];
+  node.widgets = [...node.widgets.filter(w => !ours.includes(w)), ...ours];
   const origConfigure = node.onConfigure;
   node.onConfigure = function (...args) { const r = origConfigure?.apply(this, args); if (lib.loaded) applyFilter(node); loadThumb(node); return r; };
   const paint = () => { applyFilter(node); loadThumb(node); };
@@ -233,10 +250,8 @@ app.registerExtension({
     const fromDef = defs?.MMXLoRAStack?.input?.required?.lora_1?.[0];
     if (Array.isArray(fromDef)) M.setLoraList(fromDef); else { try { await M.loadLoras(); } catch (e) {} }
     try { await fetchLibrary(true, false); } catch (e) { console.warn("[mmx-nodes] library refresh failed", e); }
-    for (const n of app.graph._nodes || []) {
-      if (n.comfyClass === "MMXLibraryImage") { applyFilter(n); loadThumb(n); }
-      if (n.comfyClass === "MMXLoRAStack") n.mmxRepopulateLoras?.();
-    }
+    refreshAllLibraryNodes();
+    for (const n of app.graph._nodes || []) if (n.comfyClass === "MMXLoRAStack") n.mmxRepopulateLoras?.();
     try { await M.loadRegistry(false); } catch (e) {}
   },
   async beforeRegisterNodeDef(nodeType, nodeData) {

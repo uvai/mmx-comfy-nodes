@@ -273,7 +273,10 @@ def main():
     mgr = importlib.import_module("mmx_presets.manager")
     if mgr._BASE is not None:
         cls = mgr.NODE_CLASS_MAPPINGS["MMXReferencesManager"]
-        check("MMXReferencesManager: same inputs and 20 outputs as the RefPack node", cls.INPUT_TYPES() == mgr._BASE.INPUT_TYPES() and len(cls.RETURN_TYPES) == 20 and cls.RETURN_NAMES == mgr._BASE.RETURN_NAMES)
+        it, bt = cls.INPUT_TYPES(), mgr._BASE.INPUT_TYPES()
+        check("MMXReferencesManager: the RefPack's inputs + first_frame (IMAGE, optional, appended LAST so widget positions are unchanged) and the same 20 outputs",
+              it["required"] == bt["required"] and list(it["optional"])[:-1] == list(bt["optional"]) and list(it["optional"])[-1] == "first_frame" and it["optional"]["first_frame"][0] == "IMAGE"
+              and {k: v for k, v in it["optional"].items() if k != "first_frame"} == bt["optional"] and len(cls.RETURN_TYPES) == 20 and cls.RETURN_NAMES == mgr._BASE.RETURN_NAMES, str(list(it["optional"])[-3:]))
         os.environ["OPENROUTER_KEY"] = "sk-test-fallback"; os.environ.pop("OPENROUTER_API_KEY", None); os.environ.pop("LLM_KEY", None)
         check("key fallback: blank -> OPENROUTER_KEY; explicit wins", mgr.resolve_key("") == "sk-test-fallback" and mgr.resolve_key(" sk-x ") == "sk-x")
         os.environ.pop("OPENROUTER_KEY")
@@ -400,10 +403,69 @@ def main():
         st = lib.start_sync(); time.sleep(0.6); st2 = lib.sync_status()
         check("Mirror from NAS with the script: started, finished rc 0, log tail visible", st["started_now"] and not st2["running"] and st2["last"]["rc"] == 0 and "done: 1 files" in st2["log_tail"], str(st2))
         open(os.environ["MMX_LIBRARY_SYNC_LOG"], "a").write("2026-09-09T07:00:00Z [library-sync] waiting: share /volume1/subgenula is LOCKED (unlock it in the vgo dashboard) — retry in 60s (attempt 3/120)\n")
-        check("last_log_line strips the timestamp; the empty-library error carries it", lib.last_log_line().startswith("[library-sync] waiting: share") and "attempt 3/120" in lib.last_log_line()
-              and "attempt 3/120" in str(lib.MMXLibraryImage.VALIDATE_INPUTS(lib.NONE)) and "last mirror log" in str(lib.MMXLibraryImage.VALIDATE_INPUTS("")) and "last_line" in lib.sync_status(), str(lib.MMXLibraryImage.VALIDATE_INPUTS(lib.NONE)))
+        # lazy file validation: unset ("" / the legacy placeholder) is a queue-time error that names the
+        # library's size, or — with an empty mirror — the last mirror log line
+        v_unset, v_legacy = lib.MMXLibraryImage.VALIDATE_INPUTS(""), lib.MMXLibraryImage.VALIDATE_INPUTS(lib.NONE)
+        check("file unset with files in the mirror: 'no file selected — pick one of the N library files' (both the empty string and the legacy placeholder)",
+              "no file selected" in str(v_unset) and "pick one of the" in str(v_unset) and str(v_legacy) == str(v_unset), str(v_unset))
+        empty_root = os.path.join(TMP, "library_empty"); os.makedirs(empty_root, exist_ok=True)
+        saved_root = os.environ["MMX_LIBRARY"]; os.environ["MMX_LIBRARY"] = empty_root
+        try:
+            v_empty = lib.MMXLibraryImage.VALIDATE_INPUTS("")
+            check("file unset with an EMPTY mirror: the error carries the last mirror log line", "library is empty" in str(v_empty) and "attempt 3/120" in str(v_empty) and "last_line" in lib.sync_status(), str(v_empty))
+            check("empty mirror: the file dropdown is [UNSET] (no placeholder text in the enum), default UNSET",
+                  lib.paths(force=True) == [lib.UNSET] and lib.MMXLibraryImage.INPUT_TYPES()["required"]["file"][1]["default"] == lib.UNSET)
+        finally:
+            os.environ["MMX_LIBRARY"] = saved_root
+        ps = lib.paths(force=True)
+        check("file dropdown = UNSET first, then the mirror's files; is_unset reads '', the legacy placeholder and any '(…)' as unset",
+              ps[0] == lib.UNSET and "Subjects/j/red.png" in ps and all(lib.is_unset(x) for x in ("", None, lib.NONE, "(no match)")) and not lib.is_unset("Subjects/j/red.png"), str(ps))
+        check("slot outside SLOTS is refused by VALIDATE_INPUTS, a listed slot passes", lib.MMXLibraryImage.VALIDATE_INPUTS("Subjects/j/red.png", "Picture 12") != True and lib.MMXLibraryImage.VALIDATE_INPUTS("Subjects/j/red.png", "Picture 9") is True)
+        # first_frame helpers of the Manager (module-level, no RefPack needed)
+        mg = importlib.import_module("mmx_presets.manager")
+        j, slot, rep_ = mg.apply_first_frame("", "mmx_ff_abc.png")
+        check("apply_first_frame on an empty list: the frame is <Picture 1>", slot == 1 and rep_ is None and json.loads(j)["references"] == [{"kind": "image", "file": "mmx_ff_abc.png"}], j)
+        base_refs = json.dumps({"references": [{"kind": "image", "file": "id.png"}, {"kind": "video", "file": "v.mp4", "use_soundtrack": True}]})
+        j, slot, rep_ = mg.apply_first_frame(base_refs, "mmx_ff_abc.png")
+        check("apply_first_frame keeps every slot and appends the frame as the LAST picture (before the videos)", slot == 2 and rep_ is None and [r["file"] for r in json.loads(j)["references"]] == ["id.png", "mmx_ff_abc.png", "v.mp4"], j)
+        stale = json.dumps({"references": [{"kind": "image", "file": "id.png"}, {"kind": "image", "file": "mmx_ff_old.png"}]})
+        j, slot, rep_ = mg.apply_first_frame(stale, "mmx_ff_new.png")
+        check("a stale mmx_ff_* entry is replaced, not stacked; find_marker returns the frontend's name", slot == 2 and [r["file"] for r in json.loads(j)["references"]] == ["id.png", "mmx_ff_new.png"] and mg.find_marker(stale) == "mmx_ff_old.png" and mg.find_marker(base_refs) is None, j)
+        full = json.dumps({"references": [{"kind": "image", "file": f"p{i}.png"} for i in range(1, 10)]})
+        j, slot, rep_ = mg.apply_first_frame(full, "mmx_ff_x.png")
+        check("with 9 pictures the 9th is replaced (cap kept)", slot == 9 and rep_ == "p9.png" and [r["file"] for r in json.loads(j)["references"]][-2:] == ["p8.png", "mmx_ff_x.png"], j)
+        t = torch.zeros((1, 8, 12, 3)); t[:, :, :6, 0] = 1.0
+        name, (w, h) = mg.write_first_frame(t, TMP)
+        name2, _ = mg.write_first_frame(t, TMP, "mmx_ff_7_abc.png")
+        name3, _ = mg.write_first_frame(t, TMP, "not_a_marker.png")
+        px = Image.open(os.path.join(TMP, name)).convert("RGB")
+        check("write_first_frame: mmx_ff_<content hash>.png by default, the frontend's mmx_ff_* marker name when given, PNG pixels match the tensor",
+              name.startswith("mmx_ff_") and name == name3 and name2 == "mmx_ff_7_abc.png" and (w, h) == (12, 8) and px.size == (12, 8) and px.getpixel((0, 0)) == (255, 0, 0) and px.getpixel((11, 0)) == (0, 0, 0)
+              and os.path.isfile(os.path.join(TMP, "mmx_ff_7_abc.png")), f"{name} {name2} {name3} {(w, h)}")
+        check("frame_bytes hash is content-stable", mg.frame_bytes(t)[1] == mg.frame_bytes(t.clone())[1] and mg.frame_bytes(t)[1] != mg.frame_bytes(t * 0)[1])
     except ImportError as e:
         print(f"skip check/gate/library checks (no torch/PIL here: {e})")
+
+    # shipped examples: both deck builds carry exactly what the nodes validate
+    lib_mod = importlib.import_module("mmx_presets.library")
+    for name in ("deck.json", "deck_chain.json"):
+        path = os.path.join(ROOT, "examples", name)
+        w = json.load(open(path)); raw = open(path).read()
+        by = {n["id"]: n for n in w["nodes"]}
+        links = {l[0]: l for l in w["links"]}
+        src = lambda nid, inp: (lambda i: (links[i["link"]][1], links[i["link"]][2]) if i and i.get("link") in links else None)(next((i for i in by[nid]["inputs"] if i["name"] == inp), None))
+        libs = [n for n in w["nodes"] if n["type"] == "MMXLibraryImage"]
+        check(f"{name}: Library nodes ship file = UNSET and a slot from SLOTS; no key",
+              len(libs) == 2 and all(n["widgets_values"][0] == lib_mod.UNSET and n["widgets_values"][1] in lib_mod.SLOTS for n in libs) and "sk-or" not in raw, str([n["widgets_values"] for n in libs]))
+        check(f"{name}: #185 is MMX References Manager with first_frame <- Load Chain Frame #404 <- Library #402; First Frame Check reference <- #404; LoadImage #300 gone",
+              by[185]["type"] == "MMXReferencesManager" and src(185, "first_frame") == (404, 0) and src(404, "fallback") == (402, 0) and src(301, "reference") == (404, 0) and 300 not in by, str((src(185, "first_frame"), src(404, "fallback"), src(301, "reference"))))
+        dangling = [l for l in w["links"] if not any(i.get("link") == l[0] for i in by[l[3]]["inputs"]) or l[0] not in [x for o in by[l[1]]["outputs"] for x in (o.get("links") or [])]]
+        check(f"{name}: every link is referenced by its source output and target input", not dangling, str(dangling)[:200])
+        if name == "deck_chain.json":
+            check("deck_chain.json: Chain Gate #406 <- decoded frames 133 + check passed 301:2; Load Chain Frame use_fallback false; deck.json true",
+                  src(406, "images") == (133, 0) and src(406, "passed") == (301, 2) and by[404]["widgets_values"] == ["mmx_chain_last.png", False] and by[406]["widgets_values"] == ["mmx_chain_last.png", True] and w["id"] == "mmx-deck-chain")
+        else:
+            check("deck.json: no Chain Gate, Load Chain Frame always uses the fallback (one segment)", 406 not in by and by[404]["widgets_values"] == ["mmx_chain_last.png", True] and w["id"] == "mmx-deck")
 
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} passed")

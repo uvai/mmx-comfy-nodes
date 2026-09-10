@@ -1,8 +1,8 @@
 {
- "id": "mmx-deck",
+ "id": "mmx-deck-chain",
  "revision": 0,
- "last_node_id": 404,
- "last_link_id": 424,
+ "last_node_id": 406,
+ "last_link_id": 426,
  "nodes": [
   {
    "id": 115,
@@ -370,7 +370,8 @@
      "links": [
       253,
       412,
-      415
+      415,
+      425
      ]
     }
    ],
@@ -1715,7 +1716,9 @@
     {
      "name": "passed",
      "type": "BOOLEAN",
-     "links": [],
+     "links": [
+      426
+     ],
      "slot_index": 2
     },
     {
@@ -1937,9 +1940,9 @@
    },
    "widgets_values": [
     "mmx_chain_last.png",
-    true
+    false
    ],
-   "title": "MMX Load Chain Frame \u2192 Manager first_frame (last picture)"
+   "title": "MMX Load Chain Frame \u2192 Manager first_frame (chain)"
   },
   {
    "id": 403,
@@ -1991,6 +1994,55 @@
     ""
    ],
    "title": "MMX Prompt Affix (triggers \u2192 prompt)"
+  },
+  {
+   "id": 406,
+   "type": "MMXChainGate",
+   "pos": [
+    760,
+    5370
+   ],
+   "size": [
+    360,
+    180
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 425
+    },
+    {
+     "name": "passed",
+     "type": "BOOLEAN",
+     "link": 426
+    }
+   ],
+   "outputs": [
+    {
+     "name": "path",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 0
+    },
+    {
+     "name": "written",
+     "type": "BOOLEAN",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "MMXChainGate"
+   },
+   "widgets_values": [
+    "mmx_chain_last.png",
+    true
+   ],
+   "title": "MMX Chain Gate \u2192 next segment"
   }
  ],
  "links": [
@@ -2473,6 +2525,22 @@
    403,
    1,
    "STRING"
+  ],
+  [
+   425,
+   133,
+   0,
+   406,
+   0,
+   "IMAGE"
+  ],
+  [
+   426,
+   301,
+   2,
+   406,
+   1,
+   "BOOLEAN"
   ]
  ],
  "groups": [

@@ -6,7 +6,7 @@
 // instance: any assignment from outside (window.mmx, the Deck, a Library node, a script) queues
 // one re-render of the slot UI, so the canvas never shows a stale reference list.
 import { app } from "../../scripts/app.js";
-import { MANAGER_TYPES, refreshManager, widget } from "./mmx_api.js";
+import { MANAGER_TYPES, refreshManager, widget, firstFrameLink, withFirstFrame, exportFirstFrameName } from "./mmx_api.js";
 
 const REFPACK_EXT = "MiniMaxRefPack.RefManager";
 const STOCK = "MiniMaxH3ReferencePack";
@@ -62,6 +62,25 @@ function hookValue(node, w, name) {
   w._mmxHooked = name + ":poll";
 }
 
+// The exported (API) references_json of an MMX References Manager whose `first_frame` input is
+// linked carries the first-frame entry as the last picture, under the filename the run will write
+// (mmx_ff_<node>_<queue>.png — unique per queue): what the server validates and executes is what
+// the export shows. The widget's own value (what the workflow saves) is untouched.
+function hookFirstFrameExport(node, w) {
+  if (!w || w._mmxFFExport) return;
+  const orig = w.serializeValue;
+  w.serializeValue = async function (n, i) {
+    let v = orig ? await orig.call(this, n, i) : this.value;
+    if (!firstFrameLink(node)) return v;
+    let list = [];
+    try { const d = JSON.parse(v || "{}"); list = Array.isArray(d.references) ? d.references.filter(r => r && r.file) : []; } catch (e) {}
+    const r = withFirstFrame(list, exportFirstFrameName(node));
+    node._mmxFirstFrameExport = { file: r.list.filter(x => x.kind === "image").pop().file, slot: r.slot, replaced: r.replaced?.file || null };
+    return JSON.stringify({ references: r.list });
+  };
+  w._mmxFFExport = true;
+}
+
 app.registerExtension({
   name: "mmx.manager",
   async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -76,5 +95,6 @@ app.registerExtension({
     hookValue(node, widget(node, "references_json"), "references_json");
     hookValue(node, widget(node, "direction"), "direction");
     node.mmxRefresh = () => refreshManager(node);
+    if (node.comfyClass === "MMXReferencesManager") hookFirstFrameExport(node, widget(node, "references_json"));
   },
 });

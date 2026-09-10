@@ -10,6 +10,13 @@ export const STACK_TYPE = "MMXLoRAStack";
 export const LIB_TYPE = "MMXLibraryImage";
 export const DECK_TYPE = "MMXDeck";
 export const CAPS = { image: 9, video: 3, audio: 3 };
+// MMX References Manager `first_frame` IMAGE input: when linked, the run writes the image into
+// ComfyUI/input as mmx_ff_<…>.png and uses it as the LAST picture (Picture N, N = image count,
+// on top of the widget's own pictures; the 9th is replaced when the list is already full).
+// The frontend puts the same entry (with a per-queue filename) into the exported references_json.
+export const FIRST_FRAME_INPUT = "first_frame";
+export const FIRST_FRAME_PREFIX = "mmx_ff_";
+export const FIRST_FRAME_FILE = "(first_frame input)";
 export const ROWS = 5;
 export const NONE = "(none)";
 
@@ -43,20 +50,51 @@ export function grouped(list) {
 }
 export function flatten(g) { return [...g.images, ...g.videos, ...g.audios]; }
 
+// ── first_frame (MMX References Manager) ───────────────────────────────────────
+export function isFirstFrameFile(f) { return typeof f === "string" && f.startsWith(FIRST_FRAME_PREFIX) && f.toLowerCase().endsWith(".png") || f === FIRST_FRAME_FILE; }
+export function firstFrameLink(node) {
+  const i = (node?.inputs || []).find(i => i.name === FIRST_FRAME_INPUT);
+  if (!i || i.link == null) return null;
+  const links = node.graph?.links || app.graph.links;
+  const L = links?.get ? links.get(i.link) : links?.[i.link];
+  return { link: i.link, origin: L ? nodeById(L.origin_id) : null };
+}
+// the list with the first-frame entry as the last picture (a stale mmx_ff_* entry is dropped first)
+export function withFirstFrame(list, file) {
+  const others = list.filter(r => !(r.kind === "image" && isFirstFrameFile(r.file)));
+  const imgs = others.filter(r => r.kind === "image");
+  let replaced = null;
+  if (imgs.length >= CAPS.image) { replaced = imgs[imgs.length - 1]; others.splice(others.indexOf(replaced), 1); }
+  const last = others.map(r => r.kind).lastIndexOf("image");
+  others.splice(last + 1, 0, { kind: "image", file });
+  return { list: others, replaced, slot: others.filter(r => r.kind === "image").length };
+}
+export function exportFirstFrameName(node) { return `${FIRST_FRAME_PREFIX}${node.id}_${Date.now().toString(36)}.png`; }
+// what the run will see: the widget's list, plus the first-frame slot when the input is linked
+export function effectiveReferences(node, exportName) {
+  const list = getReferences(node);
+  const ff = firstFrameLink(node);
+  if (!ff) return { list, firstFrame: null };
+  const r = withFirstFrame(list, exportName || FIRST_FRAME_FILE);
+  return { list: r.list, firstFrame: { ...ff, slot: r.slot, replaced: r.replaced } };
+}
+
 // The tag rule (minimax_refpack/refs.py assign_tags): <Picture n> over the images in order; per
 // video its soundtrack's <Audio a> BEFORE its <Video v>; standalone audio continues the <Audio> count.
+// Given a node, a linked first_frame input counts as the last picture.
 export function tagsOf(nodeOrList) {
-  const list = Array.isArray(nodeOrList) ? nodeOrList : getReferences(nodeOrList);
+  const eff = Array.isArray(nodeOrList) ? { list: nodeOrList, firstFrame: null } : effectiveReferences(nodeOrList);
+  const list = eff.list;
   const g = grouped(list);
   const tags = [];
-  g.images.forEach((r, i) => tags.push({ tag: `<Picture ${i + 1}>`, file: r.file, kind: "image", slot: i + 1 }));
+  g.images.forEach((r, i) => tags.push({ tag: `<Picture ${i + 1}>`, file: r.file, kind: "image", slot: i + 1, firstFrame: r.file === FIRST_FRAME_FILE }));
   let audio = 0;
   g.videos.forEach((r, i) => {
     if (r.use_soundtrack) { audio += 1; tags.push({ tag: `<Audio ${audio}>`, file: r.file, kind: "soundtrack", slot: audio }); }
     tags.push({ tag: `<Video ${i + 1}>`, file: r.file, kind: "video", slot: i + 1 });
   });
   g.audios.forEach(r => { audio += 1; tags.push({ tag: `<Audio ${audio}>`, file: r.file, kind: "audio", slot: audio }); });
-  return { pictures: g.images.length, videos: g.videos.length, audios: audio, tags };
+  return { pictures: g.images.length, videos: g.videos.length, audios: audio, tags, firstFrame: eff.firstFrame };
 }
 
 // Re-render a References Manager's slot UI from its widgets. The RefPack keeps its working
@@ -260,6 +298,7 @@ window.mmx = {
   MANAGER_TYPES, STACK_TYPE, LIB_TYPE, DECK_TYPE, CAPS,
   nodeById, findManagers, findStacks, findLibraries, defaultManager, defaultStack, remember, remembered,
   getReferences, setReferences, tagsOf, setReferenceSlot, clearReferenceSlot, parseSlot,
+  FIRST_FRAME_INPUT, FIRST_FRAME_PREFIX, FIRST_FRAME_FILE, firstFrameLink, withFirstFrame, effectiveReferences, exportFirstFrameName, isFirstFrameFile,
   getDirection, setDirection, refreshManager,
   getStack, setStack, describeStack, effectiveRows, registry, loadRegistry, triggersFor, loras, loadLoras, setLoraList, loraValues,
   jumpTo, highlight, injectLibrary, label,

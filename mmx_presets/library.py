@@ -14,7 +14,8 @@ import hashlib, os, shutil, subprocess, threading, time
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 VIDEO_EXT = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
 FOLDERS = ("Subjects", "VideoRef", "Sets")
-NONE = "(library empty — press Refresh / Mirror from NAS)"
+NONE = "(library empty — press Refresh / Mirror from NAS)"   # legacy placeholder (0.2–0.4 workflows): treated as "unset"
+UNSET = ""            # first entry of the file dropdown: nothing picked yet. Examples ship this; it is only an error on queue.
 SLOT_NONE = "(none)"
 SLOTS = [SLOT_NONE] + [f"Picture {i}" for i in range(1, 10)] + [f"Video {i}" for i in range(1, 4)] + ["Audio 1"]
 SCAN_TTL = 20.0
@@ -106,14 +107,26 @@ def scan(force: bool = False) -> list:
 
 
 def paths(force: bool = False) -> list:
-    return [it["path"] for it in scan(force)] or [NONE]
+    """The file dropdown: UNSET first (so a node with nothing picked is a valid, stable value on
+    load), then the mirror's files. An empty mirror gives [UNSET]; the node body shows the last
+    mirror log line in that case (web/mmx_nodes.js), the enum carries no placeholder text."""
+    return [UNSET] + [it["path"] for it in scan(force)]
+
+
+def is_unset(rel) -> bool:
+    rel = (rel or "").strip() if isinstance(rel, str) else ""
+    return not rel or rel == NONE or (rel.startswith("(") and rel.endswith(")"))
 
 
 def check_path(rel: str) -> str:
-    """Validate a library-relative path and return the absolute file path."""
+    """Validate a library-relative path and return the absolute file path. Lazy: an unset file
+    is an error HERE (queue / run), never at load time."""
     rel = (rel or "").strip().replace("\\", "/")
-    if not rel or rel == NONE:
-        raise ValueError(f"MMX Library: the library is empty — last mirror log: {last_log_line()}")
+    if is_unset(rel):
+        n = len(scan())
+        if n:
+            raise ValueError(f"MMX Library: no file selected — pick one of the {n} library files in the node's dropdown (type in its search box to filter)")
+        raise ValueError(f"MMX Library: no file selected and the library is empty — last mirror log: {last_log_line()}")
     if rel.startswith("/") or ".." in rel.split("/"):
         raise ValueError(f"MMX Library: bad path {rel!r}")
     p = os.path.join(root(), rel)
@@ -257,7 +270,7 @@ class MMXLibraryImage:
         # scanned NOW (not the 20 s cache) so the frontend's "R" / object_info refresh lists a file
         # that just landed in the mirror
         return {"required": {
-            "file": (paths(force=True), {"tooltip": "Subjects / VideoRef / Sets under " + root() + " — type in the search box of the node to filter; Refresh re-scans, Mirror from NAS re-syncs."}),
+            "file": (paths(force=True), {"default": UNSET, "tooltip": "Subjects / VideoRef / Sets under " + root() + " — empty = nothing picked yet (only an error when queued); type in the search box of the node to filter; Refresh re-scans, Mirror from NAS re-syncs."}),
         }, "optional": {
             "slot": (SLOTS, {"default": SLOT_NONE, "tooltip": "References Manager slot the Inject button writes this file into (Picture n = n-th image; a video into a Picture slot contributes its first frame)"}),
         }}
@@ -277,12 +290,16 @@ class MMXLibraryImage:
 
     @classmethod
     def VALIDATE_INPUTS(cls, file, slot=SLOT_NONE):
-        # our own check instead of the combo-list check, so a file picked after a Refresh queues even
-        # though the enum ComfyUI cached at load time does not list it
+        # our own check instead of the combo-list check (naming `file` and `slot` here makes
+        # ComfyUI skip its enum test for both): a file picked after a Refresh queues even though the
+        # enum cached at load time does not list it, an unset file fails only now, and `slot` is
+        # checked against the same SLOTS list the examples are built from
         try:
             check_path(file)
         except ValueError as e:
             return str(e)
+        if slot not in SLOTS:
+            return f"MMX Library: slot {slot!r} is not one of {SLOTS}"
         return True
 
     def run(self, file, slot=SLOT_NONE):

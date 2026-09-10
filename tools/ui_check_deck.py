@@ -2,21 +2,86 @@
 """Frontend checks for the deck build against a running ComfyUI (playwright chromium, headless).
 
     python3 tools/ui_check_deck.py --server http://127.0.0.1:8188 [--frame s1_first.png] [--shots DIR]
+                                   [--empty-server http://127.0.0.1:8189] [--vue-too] [--loras-dir …] [--library-dir …]
 
-Loads examples/deck.json and drives the real widgets: tag buttons follow the Manager's slots,
-Inject from the two Library nodes lands in the Manager's slot UI, Send lands in the Manager's
-direction + the Stack's rows (visible in both), the exported API JSON carries the same values,
-preset save / load / update / delete round-trip, phrase chips insert, the First Frame Check
-skips cleanly with no reference, the MMX References Manager drop-in re-renders on an external
-widget write, and the workflow serialises the pushed state.
+Loads examples/deck.json and drives the real widgets: the Deck panel fills the node and sizes it
+at 400 / 700 / 1000 px and after a reload (screenshots with --shots; --vue-too repeats that in
+the frontend's Nodes 2.0 mode), tag buttons follow the Manager's slots (a linked first_frame
+counts as the last picture), Inject from the two Library nodes lands in the Manager's slot UI,
+Send lands in the Manager's direction + the Stack's rows (visible in both), the exported API
+JSON carries the same values, preset save / load / update / delete round-trip, phrase chips
+insert, the First Frame Check skips cleanly with no reference, the Manager's first_frame input
+(run 1 = the Load Chain Frame fallback, run 2 = the Chain Gate's frame), the MMX References
+Manager drop-in re-renders on an external widget write, the workflow serialises the pushed
+state, and — against --empty-server, a ComfyUI whose library mirror is empty — deck.json and
+deck_chain.json load with zero validation errors (an unset Library file is only an error on queue).
 """
-import argparse, json, os, sys, time
+import argparse, io, json, os, sys, time, urllib.parse, urllib.request
 
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EX = os.path.join(os.path.dirname(HERE), "examples", "deck.json")
+EX_CHAIN = os.path.join(os.path.dirname(HERE), "examples", "deck_chain.json")
 results = []
+
+WIDTHS = (400, 700, 1000)
+# geometry of the Deck panel inside node 400 at the current size
+JS_LAYOUT = """() => { const n = app.graph.getNodeById(400); const ui = n._mmxDeck; const rr = ui.root.getBoundingClientRect(), ir = ui.inner.getBoundingClientRect();
+    const s = app.canvas.ds.scale || 1;
+    const strength = ui.rows.map(r => { const b = r.str.getBoundingClientRect(); return [b.width / s, (rr.right - b.right) / s, b.height > 0]; });
+    const sel = ui.rows.map(r => r.sel.getBoundingClientRect().width / s);
+    const tagBtn = ui.tagButtons['<Picture 1>'].getBoundingClientRect(), preset = ui.presetSel.getBoundingClientRect();
+    let titleBottom = null;
+    if (LiteGraph.vueNodesMode) { const h = ui.root.closest('[data-node-id]')?.querySelector('.lg-node-header, [data-testid^="node-header"]'); if (h) titleBottom = h.getBoundingClientRect().bottom; }
+    else { const cr = app.canvas.canvas.getBoundingClientRect(); titleBottom = cr.top + (n.pos[1] + app.canvas.ds.offset[1]) * s; }
+    return {size: n.size.slice(), vue: !!LiteGraph.vueNodesMode, rootW: rr.width / s, rootH: rr.height / s, innerH: ir.height / s, innerOverflow: (ir.bottom - rr.bottom) / s,
+            strength, sel, chips: [ui.phrases.scrollHeight, ui.phrases.clientHeight], pad: ui.root.style.paddingTop,
+            toolbarTop: titleBottom == null ? null : (Math.min(tagBtn.top, preset.top) - titleBottom) / s, minNodeH: n.computeSize()[1]}; }"""
+JS_CENTER = """() => { const n = app.graph.getNodeById(400); app.canvas.ds.scale = 1; app.canvas.centerOnNode(n); app.canvas.setDirty(true, true); }"""
+JS_SETW = """(w) => { const n = app.graph.getNodeById(400); n.setSize([w, n.size[1]]); n.onResize?.(n.size); app.canvas.ds.scale = 1; app.canvas.centerOnNode(n); app.canvas.setDirty(true, true); }"""
+JS_RECT = """(id) => { const n = app.graph.getNodeById(id); const c = app.canvas; const r = c.canvas.getBoundingClientRect(); const s = c.ds.scale, o = c.ds.offset;
+    return {x: r.left + (n.pos[0] + o[0]) * s, y: r.top + (n.pos[1] + o[1] - LiteGraph.NODE_TITLE_HEIGHT) * s, w: n.size[0] * s, h: (n.size[1] + LiteGraph.NODE_TITLE_HEIGHT) * s}; }"""
+
+
+def node_shot(pg, path, nid, pad=10):
+    if not path:
+        return
+    r = pg.evaluate(JS_RECT, nid)
+    vp = pg.viewport_size
+    x, y = max(0, r["x"] - pad), max(0, r["y"] - pad)
+    pg.screenshot(path=path, clip={"x": x, "y": y, "width": max(1, min(vp["width"] - x, r["w"] + 2 * pad)), "height": max(1, min(vp["height"] - y, r["h"] + 2 * pad))})
+
+
+def layout_ok(g, w):
+    """the panel fills the node, nothing is clipped, the strength inputs sit beside the dropdowns, chips do not scroll"""
+    fills = g["rootW"] >= w - 30 and g["rootW"] <= w
+    fits = g["innerOverflow"] <= 1 and g["size"][1] + 1 >= g["minNodeH"]
+    strength = all(sw >= 50 and inside >= 0 and vis for sw, inside, vis in g["strength"]) and all(x >= 100 for x in g["sel"])
+    chips = g["chips"][0] <= g["chips"][1] + 1
+    toolbar = g["toolbarTop"] is None or g["toolbarTop"] >= -0.5
+    return fills and fits and strength and chips and toolbar
+
+
+def layout_checks(pg, shot, label):
+    for w in WIDTHS:
+        pg.evaluate(JS_SETW, w); time.sleep(1.2)
+        g = pg.evaluate(JS_LAYOUT)
+        check(f"{label} {w} px: panel fills the node (root {g['rootW']:.0f} of {w}), content fits (node {g['size'][1]:.0f} ≥ min {g['minNodeH']:.0f}, overflow {g['innerOverflow']:.0f}), "
+              f"strength inputs visible beside the dropdowns, chips wrap ({g['chips'][0]}/{g['chips'][1]}), toolbar below the title (+{g['toolbarTop'] if g['toolbarTop'] is None else round(g['toolbarTop'])} px, pad {g['pad'] or '0'})",
+              layout_ok(g, w), json.dumps(g))
+        shot(f"deck_layout_{label}_{w}")
+
+
+def fetch_png(server, name, typ="input"):
+    from PIL import Image
+    with urllib.request.urlopen(f"{server}/view?filename={urllib.parse.quote(name)}&type={typ}") as r:
+        return Image.open(io.BytesIO(r.read())).convert("RGB")
+
+
+def same_image(a, b):
+    from PIL import ImageChops
+    return a.size == b.size and ImageChops.difference(a, b).getbbox() is None
 
 
 def check(name, cond, detail=""):
@@ -31,6 +96,9 @@ def main():
     ap.add_argument("--loras-dir", default="", help="ComfyUI/models/loras on this host: a file is dropped there to test the R refresh")
     ap.add_argument("--library-dir", default="", help="the library mirror root on this host (MMX_LIBRARY): a file is dropped there for the same test")
     ap.add_argument("--lib-a", default="Subjects/j/identity.png"); ap.add_argument("--lib-b", default="Sets/room/first_frame.png"); ap.add_argument("--lib-video", default="VideoRef/seg1.mp4")
+    ap.add_argument("--empty-server", default="", help="a ComfyUI whose library mirror is EMPTY: both examples must load there with zero validation errors")
+    ap.add_argument("--vue-too", action="store_true", help="repeat the layout checks with the frontend's Nodes 2.0 (Vue) mode on")
+    ap.add_argument("--input-dir", default="", help="ComfyUI/input on this host (only to delete the first_frame test's chain file afterwards)")
     a = ap.parse_args()
     shot = (lambda n: None) if not a.shots else (lambda n: pg.screenshot(path=os.path.join(a.shots, n + ".png")))
     with sync_playwright() as p:
@@ -50,9 +118,11 @@ def main():
         # 1. load deck.json
         wf = json.load(open(EX))
         wf_nodes = {n["id"]: n for n in wf["nodes"]}
+        shipped = {n["id"]: list(n["widgets_values"]) for n in wf["nodes"] if n["type"] == "MMXLibraryImage"}
+        check("shipped deck.json: both Library nodes carry file = '' (nothing picked) and a slot from the node's list", shipped == {401: ["", "Picture 1"], 402: ["", "(none)"]}, str(shipped))
         for n in wf["nodes"]:
             if n["type"] == "MMXLibraryImage":
-                n["widgets_values"][0] = a.lib_a if n["id"] == 401 else a.lib_b
+                n["widgets_values"] = [a.lib_a, "Picture 1"] if n["id"] == 401 else [a.lib_b, "Picture 9"]   # this host's files; #402 injects into Picture 9 below
         pg.evaluate("wf => app.loadGraphData(wf)", wf)
         time.sleep(4)
         info = pg.evaluate("""() => {
@@ -83,15 +153,55 @@ def main():
               and info["turbo"]["inLink"] == 334 and info["turbo"]["wv"][0].startswith("minimax_h3_fl2v_turbo") and abs(info["turbo"]["wv"][1] - 0.85) < 1e-9, str(st) + str(info["turbo"]))
         check("stack rows restored from widgets_values (row 1 on, H3_Motion_BoosterV2 @ 0.7)", dict(st["widgets"]).get("on_1") is True and dict(st["widgets"]).get("lora_1") == "H3_Motion_BoosterV2.safetensors" and abs(dict(st["widgets"]).get("strength_1") - 0.7) < 1e-9, str(st["widgets"]))
         check("Deck panel built; its 4 state widgets hidden (0 height)", info["deck"]["hasPanel"] and len(info["deck"]["hidden"]) == 4 and all(h[1] and h[2] == 0 for h in info["deck"]["hidden"]), str(info["deck"]))
-        check("References Manager #185 (stock) has the RefPack body, 20 outputs, and the mmx write hooks", info["mgr"]["hasBody"] and info["mgr"]["outputs"] == 20 and all(h and h.startswith(n) for h, n in zip(info["mgr"]["hooked"], ["references_json", "direction"])), str(info["mgr"]))
+        check("MMX References Manager #185 (drop-in) has the RefPack body, 20 outputs, and the mmx write hooks", info["mgr"]["type"] == "MMXReferencesManager" and info["mgr"]["hasBody"] and info["mgr"]["outputs"] == 20 and all(h and h.startswith(n) for h, n in zip(info["mgr"]["hooked"], ["references_json", "direction"])), str(info["mgr"]))
+        ff = pg.evaluate("""() => { const m = app.graph.getNodeById(185), lc = app.graph.getNodeById(404), lib = app.graph.getNodeById(402), chk = app.graph.getNodeById(301);
+            const L = id => app.graph.links.get ? app.graph.links.get(id) : app.graph.links[id];
+            const src = (n, name) => { const i = n.inputs.find(x => x.name === name); const l = i && i.link != null && L(i.link); return l ? [Number(l.origin_id), Number(l.origin_slot)] : null; };
+            return {ff: src(m, 'first_frame'), fallback: src(lc, 'fallback'), ref: src(chk, 'reference'), lcWidgets: lc.widgets.map(w => [w.name, w.value]), gone300: !app.graph.getNodeById(300), tags: window.mmx.tagsOf(m).tags.map(t => [t.tag, t.file, !!t.firstFrame])}; }""")
+        check("Load Chain Frame #404: fallback <- Library #402, image -> Manager first_frame AND -> First Frame Check reference; LoadImage #300 gone; use_fallback on (one segment)",
+              ff["ff"] == [404, 0] and ff["fallback"] == [402, 0] and ff["ref"] == [404, 0] and ff["gone300"] and dict(ff["lcWidgets"]).get("use_fallback") is True, str(ff))
+        check("with first_frame linked and no pictures in the widget, the Deck counts the first frame as <Picture 1>", ff["tags"] == [["<Picture 1>", "(first_frame input)", True]], str(ff["tags"]))
         check("First Frame Check #301: reference optional (shape 7), enabled widget true", dict((i[0], i[2]) for i in info["chk"]["inputs"]).get("reference") == 7 and dict(info["chk"]["widgets"]).get("enabled") is True and dict(info["chk"]["widgets"]).get("threshold_db") == 24, str(info["chk"]))
         shot("deck_loaded")
 
-        # 2. tag buttons follow the Manager's slots (empty manager: only Subject enabled)
+        # 1b. layout: the panel fills the node at 400 / 700 / 1000 px, nothing clipped, then after a reload
+        layout_checks(pg, shot, "classic")
+        pg.evaluate("wf => app.loadGraphData(wf)", wf); time.sleep(3)
+        pg.evaluate(JS_CENTER); time.sleep(1.5)
+        g = pg.evaluate(JS_LAYOUT)
+        check(f"after a workflow reload (saved size {g['size'][0]:.0f}x{g['size'][1]:.0f}): panel fills the node, content fits, strength inputs + toolbar visible, chips wrap", layout_ok(g, g["size"][0]), json.dumps(g))
+        shot("deck_layout_classic_reload")
+        if a.vue_too:
+            urllib.request.urlopen(urllib.request.Request(a.server + "/settings/Comfy.VueNodes.Enabled", data=b"true", method="POST")).read()
+            try:
+                pg.goto(a.server); pg.wait_for_function("() => window.app && window.app.graph && Object.keys(LiteGraph.registered_node_types).length > 100", timeout=180000); time.sleep(2)
+                pg.evaluate("wf => app.loadGraphData(wf)", wf); time.sleep(4)
+                check("Nodes 2.0 (Vue) mode is on for this pass", pg.evaluate("() => !!LiteGraph.vueNodesMode"))
+                layout_checks(pg, shot, "vue")
+                pg.evaluate("wf => app.loadGraphData(wf)", wf); time.sleep(3)
+                pg.evaluate(JS_CENTER); time.sleep(1.5)
+                g = pg.evaluate(JS_LAYOUT)
+                check("Vue mode, after a reload: panel fills the node, content fits, strength inputs + toolbar visible", layout_ok(g, g["size"][0]), json.dumps(g))
+                shot("deck_layout_vue_reload")
+            finally:
+                urllib.request.urlopen(urllib.request.Request(a.server + "/settings/Comfy.VueNodes.Enabled", data=b"false", method="POST")).read()
+            pg.goto(a.server); pg.wait_for_function("() => window.app && window.app.graph && Object.keys(LiteGraph.registered_node_types).length > 100", timeout=180000); time.sleep(2)
+            pg.evaluate("wf => app.loadGraphData(wf)", wf); time.sleep(4)
+        else:
+            pg.evaluate("wf => app.loadGraphData(wf)", wf); time.sleep(3)
+
+        # 2. tag buttons follow the Manager's slots (no pictures in the widget: the linked first_frame is Picture 1)
         tags = pg.evaluate("""() => { const d = app.graph.getNodeById(400); d.mmxDeck.render(); const b = d._mmxDeck.tagButtons;
-            return Object.fromEntries(Object.entries(b).map(([k, v]) => [k, !v.disabled])); }""")
-        check("empty Manager: Picture/Video/Audio buttons disabled, Subject 1-3 enabled",
-              all(tags[f"<Subject {i}>"] for i in (1, 2, 3)) and not any(tags[f"<Picture {i}>"] for i in range(1, 10)) and not tags["<Video 1>"] and not tags["<Audio 1>"], str(tags))
+            return Object.fromEntries(Object.entries(b).map(([k, v]) => [k, [!v.disabled, v.classList.contains('ff'), v.title]])); }""")
+        check("Manager with no pictures + first_frame linked: Picture 1 enabled and marked as the first frame, Picture 2+ / Video / Audio disabled, Subject 1-3 enabled",
+              all(tags[f"<Subject {i}>"][0] for i in (1, 2, 3)) and tags["<Picture 1>"][0] and tags["<Picture 1>"][1] and "first_frame" in tags["<Picture 1>"][2] and not any(tags[f"<Picture {i}>"][0] for i in range(2, 10)) and not tags["<Video 1>"][0] and not tags["<Audio 1>"][0], str(tags)[:400])
+        tags = pg.evaluate("""() => { const d = app.graph.getNodeById(400); const m = app.graph.getNodeById(185); const lc = app.graph.getNodeById(404);
+            const lk = m.inputs.find(i => i.name === 'first_frame').link; m.disconnectInput(m.inputs.findIndex(i => i.name === 'first_frame')); d.mmxDeck.render();
+            const off = Object.fromEntries(Object.entries(d._mmxDeck.tagButtons).map(([k, v]) => [k, !v.disabled]));
+            lc.connect(0, m, m.inputs.findIndex(i => i.name === 'first_frame')); d.mmxDeck.render();
+            const on = Object.fromEntries(Object.entries(d._mmxDeck.tagButtons).map(([k, v]) => [k, !v.disabled]));
+            return {off, on, relinked: m.inputs.find(i => i.name === 'first_frame').link != null}; }""")
+        check("unlinking first_frame drops that slot (no Picture enabled), relinking counts it again", not any(tags["off"][f"<Picture {i}>"] for i in range(1, 10)) and tags["on"]["<Picture 1>"] and not tags["on"]["<Picture 2>"] and tags["relinked"], str(tags)[:300])
 
         # 3. inject from the two library nodes
         r = pg.evaluate("""async () => { const lib = app.graph.getNodeById(401); await lib.widgets.find(w => w.name.startsWith('⇢ Inject into')).callback();
@@ -109,7 +219,7 @@ def main():
         check("Inject (Picture 9) into a 1-image list lands as <Picture 2>, reported honestly, earlier slot kept", r["images"] == [flat_a, flat_b] and "<Picture 2>" in r["result"] and "Picture 9" in r["result"], str(r))
         time.sleep(2.2)
         tags = pg.evaluate("() => { const b = app.graph.getNodeById(400)._mmxDeck.tagButtons; return Object.fromEntries(Object.entries(b).map(([k, v]) => [k, !v.disabled])); }")
-        check("tag buttons track the Manager: Picture 1-2 enabled, Picture 3+ disabled", tags["<Picture 1>"] and tags["<Picture 2>"] and not tags["<Picture 3>"] and not tags["<Video 1>"], str(tags))
+        check("tag buttons track the Manager: Picture 1-2 (injected) + Picture 3 (the linked first_frame) enabled, Picture 4+ disabled", tags["<Picture 1>"] and tags["<Picture 2>"] and tags["<Picture 3>"] and not tags["<Picture 4>"] and not tags["<Video 1>"], str(tags))
         thumbs = pg.evaluate("() => { const m = app.graph.getNodeById(185); return {canvas: !!m._mmrpBody.canvas, w: m._mmrpBody.canvas.width, tiles: m._mmrpRefs.images.length}; }")
         check("Manager tile canvas present with 2 image tiles", thumbs["canvas"] and thumbs["tiles"] == 2 and thumbs["w"] > 0, str(thumbs))
         shot("manager_injected")
@@ -151,7 +261,11 @@ def main():
         api_json = pg.evaluate("async () => (await app.graphToPrompt()).output")
         o185, o137 = api_json.get("185", {}).get("inputs", {}), api_json.get("137", {}).get("inputs", {})
         refs_api = json.loads(o185.get("references_json", "{}")).get("references", [])
-        check("API JSON: Manager direction + references_json match what Send/Inject wrote (2 pictures + the video)", o185.get("direction") == prompt and [x["file"] for x in refs_api if x["kind"] == "image"] == [flat_a, flat_b] and [x["file"] for x in refs_api if x["kind"] == "video"] == [a.lib_video.replace("/", "__")], json.dumps(o185)[:300])
+        imgs_api = [x["file"] for x in refs_api if x["kind"] == "image"]
+        check("API JSON: Manager direction + references_json match what Send/Inject wrote (2 pictures + the video) and carry the first_frame override as the LAST picture (mmx_ff_185_….png)",
+              o185.get("direction") == prompt and imgs_api[:2] == [flat_a, flat_b] and len(imgs_api) == 3 and imgs_api[2].startswith("mmx_ff_185_") and [x["file"] for x in refs_api if x["kind"] == "video"] == [a.lib_video.replace("/", "__")], json.dumps(o185)[:300])
+        ser_refs = pg.evaluate("() => app.graph.getNodeById(185).widgets.find(w => w.name === 'references_json').value")
+        check("the widget's own references_json (what the workflow saves) has NO first_frame entry — the override lives in the export only", "mmx_ff_" not in ser_refs and flat_b in ser_refs, ser_refs[:200])
         check("API JSON: Stack rows match", o137.get("class_type") is None and o137.get("lora_1") == "MiniMax-H3-Ref2VA-Acc-8Step.safetensors" and o137.get("strength_1") == 0.5 and o137.get("on_1") is True and o137.get("on_3") is False and api_json["137"]["class_type"] == "MMXLoRAStack", json.dumps(api_json.get("137"))[:300])
         check("API JSON: turbo LoRA #158 takes the stack's model, Deck not in the prompt path", api_json["158"]["inputs"]["model"] == ["137", 0] and api_json["400"]["class_type"] == "MMXDeck")
         a403 = api_json["403"]["inputs"]
@@ -326,12 +440,104 @@ def main():
         r = run_affix("", "prepend")
         check("Affix run with no triggers: prompt unchanged", r["status"] == "success" and r["text"][0].endswith("\n<Subject 1> walks in.") and "no triggers" in r["text"][0], str(r))
 
+        # 8c. first_frame: run 1 = the Load Chain Frame fallback (library first frame) as the last picture,
+        #     run 2 = the Chain Gate's frame; the export carries the override filename; the check compares against the same image
+        chain_name = f"mmx_uitest_ff_{int(time.time())}.png"
+        g = pg.evaluate("""async ([chain, lib, frames]) => {
+            app.graph.clear();
+            const mk = (t, x, y) => { const n = LiteGraph.createNode(t); n.pos = [x, y]; app.graph.add(n); return n; };
+            const W = (n, name, v) => { n.widgets.find(w => w.name === name).value = v; };
+            const L = mk('MMXLibraryImage', 50, 50), C = mk('MMXLoadChainFrame', 450, 50), M = mk('MMXReferencesManager', 850, 50), F = mk('LoadImage', 50, 500), K = mk('MMXFirstFrameCheck', 450, 500), G = mk('MMXChainGate', 850, 700), P = mk('PreviewImage', 1400, 50), D = mk('PreviewAny', 1400, 400), B = mk('PreviewAny', 1400, 600);
+            await new Promise(r => setTimeout(r, 300));
+            W(L, 'file', lib); W(C, 'filename', chain); W(C, 'use_fallback', false);
+            W(M, 'direction', 'first frame test'); W(M, 'prompt_provider', 'none');
+            const rw = M.widgets.find(w => w.name === 'references_json'); rw.value = JSON.stringify({references: [{kind: 'image', file: %s}]}); rw.callback?.(rw.value);
+            W(F, 'image', frames); W(K, 'threshold_db', 0); W(K, 'enabled', true); W(G, 'filename', chain); W(G, 'stop_queue', true);
+            L.connect(0, C, 0); C.connect(0, M, M.inputs.findIndex(i => i.name === 'first_frame')); C.connect(0, K, K.inputs.findIndex(i => i.name === 'reference'));
+            F.connect(0, K, 0); F.connect(0, G, 0); K.connect(2, G, 1);
+            M.connect(1, P, 0); M.connect(19, D, 0); C.connect(1, B, 0);
+            return {ids: {M: M.id, K: K.id, G: G.id, D: D.id, B: B.id}, tags: window.mmx.tagsOf(M).tags.map(t => [t.tag, t.file])}; }""" % json.dumps(flat_a), [chain_name, a.lib_b, a.frame])
+        check("first_frame graph: identity in the widget + first_frame linked -> <Picture 1> identity, <Picture 2> first_frame", g["tags"] == [["<Picture 1>", flat_a], ["<Picture 2>", "(first_frame input)"]], str(g))
+        RUN = """async (ids) => {
+            const p = await app.graphToPrompt(); const exported = p.output[String(ids.M)].inputs.references_json;
+            const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: 'ui-check'})});
+            const d = await res.json(); if (!res.ok) return {error: JSON.stringify(d).slice(0, 600)};
+            for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); const q = await (await fetch('/queue')).json(); if (!q.queue_running.length && !q.queue_pending.length) break; }
+            await new Promise(r => setTimeout(r, 800));
+            const h = await (await fetch('/history/' + d.prompt_id)).json(); const e = h[d.prompt_id]; const o = e.outputs || {};
+            return {exported, status: e.status && e.status.status_str, promptRefs: e.prompt[2][String(ids.M)].inputs.references_json,
+                    debug: ((o[String(ids.D)] || {}).text || [''])[0], fromFile: ((o[String(ids.B)] || {}).text || [''])[0], chk: o[String(ids.K)], gate: o[String(ids.G)]}; }"""
+        lib_first = fetch_png(a.server, a.lib_b.replace("/", "__"))     # the library file, as copied into input/ by the Library node
+        frame_src = fetch_png(a.server, a.frame)
+        for run in (1, 2):
+            r = pg.evaluate(RUN, g["ids"])
+            print(f"   first_frame run {run}:", json.dumps(r)[:500])
+            if "error" in r:
+                check(f"first_frame run {run} queued", False, r["error"]); break
+            exp = json.loads(r["exported"])["references"]
+            ffs = [x["file"] for x in exp if x["kind"] == "image" and x["file"].startswith("mmx_ff_")]
+            written = fetch_png(a.server, ffs[0]) if ffs else None
+            check(f"run {run}: exported API references_json = identity + the override filename as the last picture, and the executed prompt carries the same", len(ffs) == 1 and exp[-1]["file"] == ffs[0] and exp[0]["file"] == flat_a and r["promptRefs"] == r["exported"] and r["status"] == "success", json.dumps(r)[:300])
+            check(f"run {run}: Manager debug reports the override as <Picture 2>", f"first_frame: {ffs[0] if ffs else '?'}" in r["debug"] and "used as <Picture 2>" in r["debug"], r["debug"][-300:])
+            if run == 1:
+                check("run 1: Load Chain Frame used the FALLBACK (from_file False); the written mmx_ff file IS the library first frame; the gate wrote the chain file", r["fromFile"] == "False" and written is not None and same_image(written, lib_first) and not same_image(written, frame_src) and r["gate"]["written"] == [True], str(r["fromFile"]) + str(r["gate"]))
+            else:
+                check("run 2: Load Chain Frame read the gate's frame (from_file True); the written mmx_ff file IS that frame (not the fallback)", r["fromFile"] == "True" and written is not None and same_image(written, frame_src) and not same_image(written, lib_first), str(r["fromFile"]))
+                check("run 2: the First Frame Check compared the frames against the SAME image the Manager anchored (PSNR 100, identical)", r["chk"]["psnr"] == [100] and r["chk"]["passed"] == [True], str(r["chk"]["text"]))
+        if a.input_dir:
+            for f in (chain_name, chain_name.replace(".png", "_REJECTED.png")):
+                try: os.remove(os.path.join(a.input_dir, f))
+                except OSError: pass
+
         # 9. phrases / presets survive a Refresh (pull) from the panel
         pg.evaluate("wf => app.loadGraphData(wf)", wf); time.sleep(3)
         r = pg.evaluate("""async () => { const d = app.graph.getNodeById(400), ui = d._mmxDeck; ui.btnRefresh.click(); await new Promise(r => setTimeout(r, 1500)); return {presets: ui.presetSel.options.length, chips: ui.phrases.querySelectorAll('.chip').length, loras: ui.rows[0].sel.options.length}; }""")
         check("↻ Refresh re-reads presets / phrases / LoRAs (pulling the NAS copy first)", r["chips"] >= 15 and r["loras"] >= 4, str(r))
         errs = [e for e in errors if "mmx" in e.lower() or "MiniMaxRefPack" in e]
         check("no page errors from the mmx / RefPack extensions", not errs, str(errs)[:600])
+
+        # 10. a clean ComfyUI with an EMPTY library: both examples load as shipped with zero validation errors
+        if a.empty_server:
+            pg2 = b.new_page(viewport={"width": 1900, "height": 1150})
+            errs2 = []
+            pg2.on("pageerror", lambda e: errs2.append("PAGE " + str(e)))
+            pg2.on("console", lambda m: errs2.append(m.text) if m.type == "error" else None)
+            pg2.goto(a.empty_server)
+            pg2.wait_for_function("() => window.app && window.app.graph && Object.keys(LiteGraph.registered_node_types).length > 100", timeout=180000); time.sleep(2)
+            lib_enum = json.loads(urllib.request.urlopen(a.empty_server + "/object_info/MMXLibraryImage").read())["MMXLibraryImage"]["input"]
+            check("empty-library server: the file enum is [''] (unset first, no placeholder text) and the slot enum is the SLOTS list", lib_enum["required"]["file"][0] == [""] and lib_enum["optional"]["slot"][0][:2] == ["(none)", "Picture 1"] and "Picture 9" in lib_enum["optional"]["slot"][0], str(lib_enum["required"]["file"][0]))
+            for path, label, n_nodes in ((EX, "deck.json", 33), (EX_CHAIN, "deck_chain.json", 34)):
+                wfe = json.load(open(path))
+                n_err = len(errs2)
+                pg2.evaluate("wf => app.loadGraphData(wf)", wfe); time.sleep(4)
+                st = pg2.evaluate("""(n) => { const nodes = app.graph._nodes || []; const missing = nodes.filter(x => !LiteGraph.registered_node_types[x.type]).map(x => x.type);
+                    const toasts = [...document.querySelectorAll('.p-toast-message, .p-dialog')].map(e => e.innerText.slice(0, 200));
+                    const libs = nodes.filter(x => x.type === 'MMXLibraryImage').map(x => { const f = x.widgets.find(w => w.name === 'file'), s = x.widgets.find(w => w.name === 'slot'); return {id: x.id, file: f.value, fileOk: f.options.values.includes(f.value), slot: s.value, slotOk: s.options.values.includes(s.value), order: x.widgets.slice(0, 2).map(w => w.name), body: (x.widgets.find(w => w.name === 'mmx_result') || {}).value}; });
+                    const m = app.graph.getNodeById(185); const ffl = m.inputs.find(i => i.name === 'first_frame');
+                    return {count: nodes.length, missing, toasts, libs, mgr: {type: m.type, body: !!m._mmrpBody, outputs: m.outputs.length, ff: ffl && ffl.link != null}, gate: !!app.graph.getNodeById(406), deckPanel: !!app.graph.getNodeById(400)._mmxDeck}; }""", n_nodes)
+                print(f"   clean load {label}:", json.dumps(st)[:700])
+                # a toast about model files this host lacks, or a 404 on the base graph's VideoCombine preview, is not the pack's:
+                # only messages naming our nodes / widgets / validation count
+                ours = lambda t: any(k in t for k in ("MMX", "mmx", "Library", "slot", "first_frame", "RefPack", "valid", "widget"))
+                bad_toasts = [t for t in st["toasts"] if ours(t)]; bad_errs = [e for e in errs2[n_err:] if ours(e)]
+                check(f"{label} on the empty-library server: {n_nodes} nodes, no missing types, no validation toast / dialog, no console error about the pack's nodes or widgets",
+                      st["count"] == n_nodes and not st["missing"] and not bad_toasts and not bad_errs, str(st["missing"]) + str(st["toasts"]) + str(errs2[n_err:])[:300])
+                check(f"{label}: Library nodes load file = '' and slot = shipped value, BOTH inside their dropdown lists; widgets are [file, slot] first",
+                      [(x["file"], x["slot"]) for x in st["libs"]] == [("", "Picture 1"), ("", "(none)")] and all(x["fileOk"] and x["slotOk"] and x["order"] == ["file", "slot"] for x in st["libs"]), str(st["libs"])[:400])
+                check(f"{label}: the node body shows the empty library + the last mirror log line", all("library empty" in (x["body"] or "") and "last mirror log" in (x["body"] or "") for x in st["libs"]), str([x["body"] for x in st["libs"]])[:300])
+                check(f"{label}: MMX References Manager #185 with the RefPack body, 20 outputs, first_frame linked; Deck panel built" + ("; Chain Gate #406 present" if label.startswith("deck_chain") else ""),
+                      st["mgr"] == {"type": "MMXReferencesManager", "body": True, "outputs": 20, "ff": True} and st["deckPanel"] and st["gate"] == label.startswith("deck_chain"), str(st["mgr"]))
+                q = pg2.evaluate("""async () => { const p = await app.graphToPrompt(); const res = await fetch('/prompt', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt: p.output, client_id: 'ui-check'})});
+                    const d = await res.json(); const ne = d.node_errors || {}; return Object.fromEntries(Object.entries(ne).map(([k, v]) => [k, [v.class_type, v.errors.map(e => e.type + ': ' + e.message + ' / ' + e.details)]])); }""")
+                mmx_errs = {k: v for k, v in q.items() if v[0].startswith("MMX")}
+                check(f"{label}: queueing reports the unset file ONLY as a lazy custom validation on #402 (wired into the chain) — no value_not_in_list on any MMX node, nothing on the unwired #401",
+                      set(mmx_errs) == {"402"} and all("no file selected" in e for e in mmx_errs["402"][1]) and not any("value_not_in_list" in e for v in q.values() for e in v[1] if v[0].startswith("MMX")), json.dumps(mmx_errs)[:400])
+                if label == "deck.json":
+                    pg2.evaluate("""() => { const n = app.graph.getNodeById(402); app.canvas.ds.scale = 1; app.canvas.centerOnNode(n); app.canvas.setDirty(true, true); }"""); time.sleep(1)
+                    node_shot(pg2, os.path.join(a.shots, "library_empty_402.png") if a.shots else "", 402)
+            pg2.close()
+        else:
+            print("skip clean-load checks (pass --empty-server for a ComfyUI with an empty library mirror)")
         b.close()
     failed = results.count(False)
     print(f"\n{len(results) - failed}/{len(results)} passed")
